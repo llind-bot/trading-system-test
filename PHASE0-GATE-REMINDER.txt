@@ -1,0 +1,16 @@
+=== PHASE 0 GATE REMINDER ===
+FIRE TIME: 2026-08-18 at ~9:30 AM ET (NYSE open)
+
+ACTION NEEDED:
+1. Cancel existing PANW/UNH/V day orders (they expired at market close)
+2. Place fresh MARKET SELL orders when NYSE opens
+3. Verify all paper positions = 0
+4. THEN start Phase 3
+
+CURRENT EXPOSURE (still open):
+- PANW: qty=1.294 @ $386.49 → sell market
+- UNH: qty=1.246 @ $401.14 → sell market  
+- V: qty=1.373 @ $364.21 → sell market
+
+⚠️ Phase 0 gate is BLOCKED until all positions are zero.
+===
