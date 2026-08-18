@@ -1,0 +1,33 @@
+# Database files — never commit live DBs
+database/*.db
+database/*.db-wal
+database/*.db-shm
+
+# Environment secrets — NEVER commit keys
+config/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

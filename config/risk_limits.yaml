@@ -1,0 +1,8 @@
+# config/risk_limits.yaml — Global risk caps (dollar-based)
+global:
+  max_drawdown_dollar: 1000       # halt all trading if equity drops $1k from peak
+  daily_loss_limit_dollar: -300   # stop for the day at -$300 PnL
+  emergency_stop: false           # kill switch (true = halt everything)
+  max_concurrent_positions: 10    # maximum open positions
+  min_cash_reserve_dollar: 2000   # always keep $2k cash buffer
+  max_total_exposure_dollar: 8000 # total open positions can't exceed this

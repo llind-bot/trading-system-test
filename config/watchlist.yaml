@@ -1,0 +1,810 @@
+defaults:
+  _comment: 'Inherited by all entries unless overridden on the entry itself.
+
+    '
+  sl_pct: -20
+  trailing_stop_pct: 3
+  sell_strategies:
+  - tp_ladder
+  - trailing_stop
+  max_hold_hours: null
+  tp_levels_default:
+  - level: 1
+    profit_pct: 1.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2.5
+    sell_pct: 0.35
+  - level: 3
+    profit_pct: 5.0
+    sell_pct: 0.4
+assets:
+- symbol: AAPL
+  asset_class: stock
+  max_position_dollar: 1000
+  sl_pct: -20
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.3
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: MSTR
+  asset_class: stock
+  max_position_dollar: 1000
+  sl_pct: -5
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.1
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 7.0
+    sell_pct: 0.5
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 7
+      oversold_threshold: 16
+      overbought_threshold: 90
+      bb_period: 16
+      bb_multiplier: 2.3
+      trend_sma_period: 20
+      tp_fixed_pct: 2.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 7.0
+      sl_fixed_pct: -5
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: SPCX
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -5
+  trailing_stop_pct: 5
+  tp_levels:
+  - level: 1
+    profit_pct: 3.0
+    sell_pct: 0.5
+  - level: 2
+    profit_pct: 6.0
+    sell_pct: 0.3
+  - level: 3
+    profit_pct: 10.0
+    sell_pct: 0.2
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 10
+      oversold_threshold: 17
+      overbought_threshold: 80
+      bb_period: 16
+      bb_multiplier: 2.3
+      trend_sma_period: 20
+      tp_fixed_pct: 3.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 3.0
+      max_tp_pct: 10.0
+      sl_fixed_pct: -5
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: NVDA
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -15
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 3.0
+    sell_pct: 0.2
+  - level: 2
+    profit_pct: 6.0
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 10.0
+    sell_pct: 0.3
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 7
+      oversold_threshold: 12
+      overbought_threshold: 80
+      bb_period: 36
+      bb_multiplier: 2.8
+      trend_sma_period: 20
+      tp_fixed_pct: 3.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 3.0
+      max_tp_pct: 10.0
+      sl_fixed_pct: -15
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: AMD
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -20
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 13
+      sma_slow: 26
+  enabled: false
+- symbol: GOOGL
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -20
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: META
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -18
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 13
+      sma_slow: 26
+  enabled: false
+- symbol: PLTR
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -18
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 13
+      sma_slow: 26
+  enabled: false
+- symbol: ABNB
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -20
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: V
+  asset_class: stock
+  max_position_dollar: 500
+  sl_pct: -5
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.1
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 7.0
+    sell_pct: 0.5
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 7
+      oversold_threshold: 16
+      overbought_threshold: 85
+      bb_period: 16
+      bb_multiplier: 2.3
+      trend_sma_period: 20
+      tp_fixed_pct: 2.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 7.0
+      sl_fixed_pct: -5
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: JPM
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -20
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: UNH
+  asset_class: stock
+  max_position_dollar: 500
+  sl_pct: -5
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.1
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 7.0
+    sell_pct: 0.5
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 7
+      oversold_threshold: 16
+      overbought_threshold: 85
+      bb_period: 16
+      bb_multiplier: 2.3
+      trend_sma_period: 20
+      tp_fixed_pct: 2.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 7.0
+      sl_fixed_pct: -5
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: MSFT
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -20
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: PANW
+  asset_class: stock
+  max_position_dollar: 500
+  sl_pct: -5
+  trailing_stop_pct: 3
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.1
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 7.0
+    sell_pct: 0.5
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 7
+      oversold_threshold: 16
+      overbought_threshold: 85
+      bb_period: 16
+      bb_multiplier: 2.3
+      trend_sma_period: 20
+      tp_fixed_pct: 2.0
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 7.0
+      sl_fixed_pct: -5
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.1
+  enabled: true
+- symbol: XOM
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -12
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - SMA_Crossover
+  strategy_params:
+    SMA_Crossover:
+      sma_fast: 9
+      sma_slow: 21
+  enabled: false
+- symbol: TSLA
+  asset_class: stock
+  max_position_dollar: 100
+  sl_pct: -18
+  trailing_stop_pct: 4
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.5
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.25
+  strategies:
+  - ORB
+  - Donchian_Breakout
+  strategy_params:
+    ORB:
+      orb_bars: 5
+      confirm_pct: 0.015
+    Donchian_Breakout:
+      breakout_confirm_pct: 0.015
+      donchian_period: 20
+  enabled: false
+- symbol: BTC/USD
+  asset_class: crypto
+  max_position_dollar: 1000
+  sl_pct: -12
+  trailing_stop_pct: 8
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.5
+    sell_pct: 0.35
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  enabled: true
+- symbol: ETH/USD
+  asset_class: crypto
+  max_position_dollar: 1000
+  sl_pct: -12
+  trailing_stop_pct: 8
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 3.5
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.0
+    sell_pct: 0.35
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  enabled: true
+- symbol: SOL/USD
+  asset_class: crypto
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.5
+    sell_pct: 0.35
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  enabled: true
+- symbol: AVAX/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  tp_levels:
+  - level: 1
+    profit_pct: 2.5
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 4.5
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 6.5
+    sell_pct: 0.35
+- symbol: LINK/USD
+  asset_class: crypto
+  enabled: false
+  max_position_dollar: 100
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - RSI_MeanReversion
+  - SMA_Crossover
+  - VWAP_Reversion
+  strategy_params:
+    RSI_MeanReversion:
+      rsi_period: 14
+      adx_threshold: 15
+  tp_levels:
+  - level: 1
+    profit_pct: 1
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 3
+    sell_pct: 0.35
+- symbol: UNI/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -20
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -20
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 3.5
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.0
+    sell_pct: 0.35
+- symbol: XRP/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  tp_levels:
+  - level: 1
+    profit_pct: 1.5
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 2.5
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 4.0
+    sell_pct: 0.35
+- symbol: LTC/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  tp_levels:
+  - level: 1
+    profit_pct: 1.5
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 3.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 4.5
+    sell_pct: 0.35
+- symbol: DOGE/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      max_tp_pct: 6.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+      atr_period: 14
+      base_confidence: 0.7
+      rsi_depth_conf_mult: 0.002
+      penetration_conf_threshold: 0.3
+      penetration_conf_bonus: 0.05
+      confidence_cap: 0.95
+      trend_filter_buy_threshold: -3.0
+      trend_filter_sell_threshold: 3.0
+  tp_levels:
+  - level: 1
+    profit_pct: 2.0
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 4.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.5
+    sell_pct: 0.35
+- symbol: PEPE/USD
+  asset_class: crypto
+  max_position_dollar: 100
+  sl_pct: -12
+  trailing_stop_pct: 10
+  tp_levels:
+  - level: 1
+    profit_pct: 2.5
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 4.5
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 6.5
+    sell_pct: 0.35
+  strategies:
+  - RSI_MeanReversion
+  strategy_params:
+    RSI_MeanReversion:
+      rsi_period: 3
+      adx_threshold: 25
+    CryptoSwingDaily:
+      sl_fixed_pct: -12
+  enabled: false
+- symbol: ADA/USD
+  asset_class: crypto
+  enabled: true
+  max_position_dollar: 200
+  sl_pct: -12
+  trailing_stop_pct: 8
+  strategies:
+  - CryptoSwingDaily
+  strategy_params:
+    CryptoSwingDaily:
+      rsi_period: 14
+      oversold_threshold: 40
+      overbought_threshold: 95
+      bb_period: 20
+      bb_multiplier: 2.0
+      trend_sma_period: 50
+      tp_fixed_pct: 2.5
+      tp_atr_mult: 1.5
+      min_tp_pct: 2.0
+      sl_fixed_pct: -12
+      sl_sell_pct: 3.0
+      use_trend_filter: true
+      min_penetration_depth_pct: 0.15
+  tp_levels:
+  - level: 1
+    profit_pct: 1.5
+    sell_pct: 0.25
+  - level: 2
+    profit_pct: 3.0
+    sell_pct: 0.4
+  - level: 3
+    profit_pct: 5.0
+    sell_pct: 0.35
