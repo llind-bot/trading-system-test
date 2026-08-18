@@ -326,6 +326,21 @@ class BarIngest:
                     created_at  TEXT    NOT NULL
                 )
             """)
+            # Orders table — SignalRouter writes here for generated order directives
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS orders (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol      TEXT    NOT NULL,
+                    side        TEXT    NOT NULL,
+                    qty         REAL    NOT NULL,
+                    price       REAL    NOT NULL,
+                    source      TEXT,
+                    status      TEXT    NOT NULL DEFAULT 'pending',
+                    confidence  REAL,
+                    strategy    TEXT,
+                    created_at  TEXT    NOT NULL
+                )
+            """)
             conn.commit()
         finally:
             conn.close()

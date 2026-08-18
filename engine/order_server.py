@@ -121,9 +121,24 @@ class SignalRouter:
             try:
                 conn = self.db.connect()
                 try:
+                    # Ensure orders table exists
+                    try:
+                        conn.execute("SELECT 1 FROM orders LIMIT 0")
+                    except Exception:
+                        conn.execute("""
+                            CREATE TABLE IF NOT EXISTS orders (
+                                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                symbol TEXT NOT NULL, side TEXT NOT NULL,
+                                qty REAL NOT NULL, price REAL NOT NULL,
+                                source TEXT, status TEXT NOT NULL DEFAULT 'pending',
+                                confidence REAL, strategy TEXT, created_at TEXT
+                            )""")
+                        conn.commit()
+                    
                     conn.execute(
-                        """INSERT INTO orders (symbol, side, qty, price, source, status, created_at)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        """INSERT INTO orders (symbol, side, qty, price, source, status,
+                           confidence, strategy, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         (
                             sym.upper(),
                             side,
@@ -131,6 +146,8 @@ class SignalRouter:
                             price,
                             source,
                             "pending",
+                            best.get("confidence", 0),
+                            best.get("strategy", ""),
                             datetime.now(ZoneInfo("America/New_York")).isoformat(),
                         ),
                     )
