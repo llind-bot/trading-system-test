@@ -7,6 +7,7 @@ Auth, subscribe, reconnect logic mirrors the real Alpaca Streams protocol.
 """
 
 import asyncio
+import json
 import logging
 import math
 import msgpack
@@ -14,7 +15,7 @@ import os
 import time
 from typing import Optional
 
-from infra.logger import get_logger
+from infra.logger import get_logger, StructuredMessage
 
 _log = get_logger("ws-feed")
 
@@ -23,9 +24,16 @@ _log = get_logger("ws-feed")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _msgpack_auth(key: str, secret: str) -> bytes:
-    """Encode the auth handshake frame."""
-    return msgpack.packb({"action": "auth", "key": key, "secret": secret})
+def _msgpack_auth(key: str, secret: str, stream_type: str = "stock") -> bytes | str:
+    """Encode the auth handshake frame.
+    
+    Stock SIP (v2/sip) accepts msgpack bytes.
+    Crypto (v1beta3/crypto/us) requires JSON text.
+    """
+    frame = {"action": "auth", "key": key, "secret": secret}
+    if stream_type == "crypto":
+        return json.dumps(frame)  # crypto endpoint expects JSON text
+    return msgpack.packb(frame)  # stock SIP accepts msgpack bytes
 
 
 def _msgpack_subscribe(stream: str, **subs) -> bytes:
@@ -38,13 +46,23 @@ def _msgpack_subscribe(stream: str, **subs) -> bytes:
     return msgpack.packb(payload)
 
 
-def _unpack_frame(raw: bytes) -> dict:
-    """Try msgpack first; fall back to JSON decode."""
+def _unpack_frame(raw):  # can be bytes or str (websockets 10.4 returns both)
+    """Unwrap a single WS frame.
+
+    Alpaca frames come in three forms depending on content type:
+      - JSON string → parse as JSON, possibly list-wrapped (welcome/auth/sub response)
+      - Msgpack bytes → unpack to dict
+      - Bar/trade data → msgpack bytes, each message contains ONE frame object
+    """
+    if isinstance(raw, str):
+        parsed = json.loads(raw)  # type: ignore[name-defined]
+        return parsed if not isinstance(parsed, list) else (parsed[0] if parsed else {})
+    # Bytes — try msgpack first
     try:
-        return msgpack.unpackb(raw, raw=False)
+        obj = msgpack.unpackb(raw, raw=False)
+        return obj if not isinstance(obj, list) else (obj[0] if obj else {})
     except Exception:
-        import json
-        return json.loads(raw)
+        return json.loads(raw)  # type: ignore[name-defined]
 
 
 # ---------------------------------------------------------------------------
@@ -128,19 +146,46 @@ class WSSender:
         # --- auth -------------------------------------------------------
         api_key = os.environ.get("ALPACA_API_KEY", "")
         secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
-        await self.send(_msgpack_auth(api_key, secret_key))
+        # Auth format depends on stream type (crypto needs JSON text, stock uses msgpack)
+        auth_frame = _msgpack_auth(api_key, secret_key, stream_type=self.url.split("/")[-2] if "stream" in self.url else "stock")
+        if isinstance(auth_frame, str):
+            await self._ws.send(auth_frame)  # JSON text for crypto
+        else:
+            await self._ws.send(auth_frame)  # msgpack bytes for stock
 
         try:
-            auth_resp = await asyncio.wait_for(self._recv_queue.get(), timeout=min(timeout - 2, 5.0))
-            if isinstance(auth_resp, dict) and auth_resp.get("T") == "success":
-                _log.info("ws_authenticated", stream=self.url)
+            auth_resp_raw = await asyncio.wait_for(self._recv_queue.get(), timeout=min(timeout - 2, 5.0))
+            
+            # Handle str vs bytes response (welcome/auth are JSON strings from Alpaca)
+            if isinstance(auth_resp_raw, str):
+                parsed = json.loads(auth_resp_raw)
+                auth_resp = parsed if not isinstance(parsed, list) else (parsed[0] if parsed else {})
+            elif isinstance(auth_resp_raw, bytes):
+                try:
+                    auth_resp = msgpack.unpackb(auth_resp_raw, raw=False)
+                except Exception:
+                    auth_resp = {}
             else:
-                _log.error("ws_auth_failed", frame=auth_resp)
-                self._connected = False
+                auth_resp = auth_resp_raw
+            
+            if isinstance(auth_resp, dict) and auth_resp.get("T") == "success":
+                _log.info(StructuredMessage("ws_authenticated", stream=self.url))
+            else:
+                _log.error(StructuredMessage("ws_auth_failed", frame=auth_resp))
+                # Clean up zombie receiver task before returning False
+                if self._receiver_task and not self._receiver_task.done():
+                    self._receiver_task.cancel()
+                    try: await asyncio.wait_for(self._receiver_task, timeout=1.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError): pass
+                await self.stop()
                 return False
         except asyncio.TimeoutError:
-            _log.error("ws_auth_timeout", url=self.url)
-            self._connected = False
+            _log.error(StructuredMessage("ws_auth_timeout", url=self.url))
+            if self._receiver_task and not self._receiver_task.done():
+                self._receiver_task.cancel()
+                try: await asyncio.wait_for(self._receiver_task, timeout=1.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError): pass
+            await self.stop()
             return False
 
         return True
@@ -149,7 +194,15 @@ class WSSender:
         """Send subscription request.  *subs* keys map to Alpaca field names."""
         if not self._connected:
             return False
-        await self.send(_msgpack_subscribe(**subs))
+        # Determine the stream key for this sender based on url
+        stream_key = "trades"  # default stock-style
+        if "crypto" in self.url or "v1beta3" in self.url:
+            # For crypto, subscribe keys need proper format — pass through raw
+            subs_encoded = json.dumps({"action": "subscribe", **subs})
+            await self._ws.send(subs_encoded)
+            return True
+        else:
+            await self.send(_msgpack_subscribe(stream_key, **subs))
         _log.info("ws_subscribed", streams={k: len(v) for k, v in subs.items()})
         return True
 
@@ -250,6 +303,12 @@ class WSFeed:
         if not await sender.start(timeout=15.0):
             return False
 
+        # Save sender on self for health checks
+        if stream_name == "stock":
+            self._stock_sender = sender
+        else:
+            self._crypto_sender = sender
+
         # Subscribe — fill default fallback when list is empty
         if stream_name == "stock":
             syms = self._stock_symbols or self.DEFAULT_STOCK_SUBS
@@ -257,7 +316,8 @@ class WSFeed:
             await sender.subscribe(trades=syms, quotes=quotes)
         else:
             syms = self._crypto_symbols or self.DEFAULT_CRYPTO_SUBS
-            await sender.subscribe(trades=syms, bars=syms)
+            # Alpaca crypto: use "bars" key (not "crypto_bars") matching legacy format
+            await sender.subscribe(bars=syms)
 
         # Start background dispatcher for this stream
         asyncio.ensure_future(self._dispatch(stream_name, sender))
@@ -273,13 +333,15 @@ class WSFeed:
             if frame is None:
                 continue                        # timeout, keep looping
 
-            # Update tick metrics
-            if stream_name == "stock":
-                self._last_stock_tick = time.time()
-                self._stock_tick_count += 1
-            else:
-                self._last_crypto_tick = time.time()
-                self._crypto_tick_count += 1
+            # Update tick metrics for data frames only (skip control)
+            T = frame.get("T", "?")
+            if T not in ("subscription", "success", "error"):
+                if stream_name == "stock":
+                    self._last_stock_tick = time.time()
+                    self._stock_tick_count += 1
+                else:
+                    self._last_crypto_tick = time.time()
+                    self._crypto_tick_count += 1
 
             target_queue.put_nowait(frame)
 

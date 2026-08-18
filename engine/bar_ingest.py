@@ -23,7 +23,7 @@ TRADE_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TRADE_ROOT))
 
 from infra.db_pool import get_db
-from infra.logger import get_logger
+from infra.logger import get_logger, StructuredMessage
 from infra.ws_feed import WSFeed, drain_queue, _unpack_frame
 
 _log = get_logger("bar-ingest")
@@ -164,10 +164,12 @@ class BarIngest:
 
     async def start(self) -> dict:
         """Initialize DB tables, connect feeds, and return health."""
+        if self._running:
+            return self.ws_feed.health()  # Already started
         await self._init_db()
         health = await self.ws_feed.start(timeout=15.0)
         self._running = True
-        _log.info("bar_ingest_started", bar_type=self.bar_type, **health)
+        _log.info(StructuredMessage("bar_ingest_started", bar_type=self.bar_type, **health))
         return health
 
     async def run(self) -> None:
@@ -231,26 +233,47 @@ class BarIngest:
 
     @staticmethod
     def _handle_frame(frame: dict) -> None:
-        """Dispatch a raw trade/quote/bars event from the WS feed."""
+        """Dispatch a raw trade/quote/bars event from the WS feed.
+        
+        Frame structure depends on stream type:
+          Stock trades: {"T": "t", "S": "PANW", "P": 385.0, "s": 100}
+          Crypto bars:  {"S": "BTC/USD", "o": {"o": 97000, "h": 97500, "l": 96800, "c": 97200, "v": 1.5}}
+          Errors:       {"T": "error", "msg": "..."}
+        """
         T = frame.get("T") or frame.get("type")
-        if T in ("t", "trade"):
-            # Stock SIP trade event
-            sym = frame.get("S") or frame.get("symbol")
+        
+        # Error control frames
+        if T == "error":
+            _log.error(StructuredMessage("ws_error_frame", stream="unknown", msg=frame.get("msg", "")))
+            return
+        
+        # Subscription confirmations — skip
+        if T in ("subscription", "success"):
+            return
+        
+        sym = frame.get("S") or frame.get("symbol")
+        ts = frame.get("t") or frame.get("T_s") or frame.get("timestamp")
+        
+        # Crypto bars: nested OHLCV in 'o' key (no T field, but has 'o', 'h', 'l', 'c', 'v')
+        if "o" in frame and isinstance(frame["o"], dict):
+            ohlcv = frame["o"]
+            o_price = ohlcv.get("o")
+            if sym and o_price is not None:
+                _log.info(
+                    "bar_received",
+                    symbol=sym, bar_type="crypto",
+                    open=round(o_price, 2), high=ohlo.get("h"), low=ohlcv.get("l"), 
+                    close=ohlcv.get("c"), volume=ohlcv.get("v"), ts=ts
+                )
+        # Stock trades: T="t" with P (price) and s (size)
+        elif T in ("t", "trade"):
             price = frame.get("P") or frame.get("price")
             size = frame.get("s") or frame.get("size")
-            ts = frame.get("T_s") or frame.get("timestamp") or frame.get("t")
             if sym and price is not None:
-                BarIngest._log_trade(sym, price, size, ts)
-        elif T in ("q", "quote"):
-            pass  # quotes not used for bar aggregation in Phase 3
-        elif T in ("b", "bar", "B"):
-            # Crypto bars (Alpaca sends OHLCV directly)
-            sym = frame.get("S") or frame.get("symbol")
-            bar = frame.get("o")
-            if sym and bar:
-                BarIngest._log_info(f"ws_bar_received", symbol=sym, open=bar.get("o"), close=bar.get("c"))
-        elif T == "error":
-            _log.error("ws_error_frame", stream="unknown", msg=frame.get("msg", ""))
+                _log.info(
+                    "trade_received",
+                    symbol=sym.upper(), price=price, size=size or 0, ts=ts
+                )
 
     @staticmethod
     def _log_trade(sym: str, price: float, size: int | None, ts: str | None) -> None:

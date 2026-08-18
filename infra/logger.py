@@ -2,13 +2,14 @@
 
 JSON structured logs with rotation. Each engine gets a unique tag.
 ERROR+ level logs trigger notification via notify_engine.
+
+Extra fields are supported via kwargs: _log.info("msg", key="value")
 """
 
 import json
 import logging
-import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -18,7 +19,7 @@ class JSONFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         log_data = {
-            "timestamp": datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "ET",
+            "timestamp": datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "+00:00",
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -26,8 +27,7 @@ class JSONFormatter(logging.Formatter):
             "function": record.funcName,
             "line": record.lineno,
         }
-        # Add extra fields if present
-        if hasattr(record, "extra_fields"):
+        if hasattr(record, "extra_fields") and record.extra_fields:
             log_data.update(record.extra_fields)
         return json.dumps(log_data)
 
@@ -35,37 +35,76 @@ class JSONFormatter(logging.Formatter):
 def get_logger(name: str, tag: Optional[str] = None) -> logging.Logger:
     """Get a configured logger with JSON formatting and rotation.
 
-    Args:
-        name: Logger name (usually engine module name)
-        tag: Display tag shown in logs (e.g., '[stock-test]', '[crypto-test]')
-
-    Returns:
-        Configured logger instance
+    Supports extra fields via **kwargs in info/warning/error/debug calls.
+    E.g. _log.info("connected", stream="stock") → {"message": "connected", "stream": "stock"}
     """
-    # Resolve log directory relative to test repo root
     trade_root = Path(__file__).resolve().parents[1]
     log_dir = trade_root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(name)
 
-    # Prevent duplicate handlers on repeated calls
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
 
-        # File handler with rotation
         fh = logging.FileHandler(log_dir / f"{name}.log")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(JSONFormatter())
         logger.addHandler(fh)
 
-        # Console handler (stderr) for quick visibility
         ch = logging.StreamHandler(sys.stderr)
         ch.setLevel(logging.WARNING)
         ch.setFormatter(JSONFormatter())
         logger.addHandler(ch)
 
+    # Wrap all level methods to support **extra fields
+    _orig_debug = logger.debug
+    _orig_info = logger.info
+    _orig_warning = logger.warning
+    _orig_error = logger.error
+    _orig_critical = logger.critical
+
+    def _wrap(orig_method):
+        def wrapped(msg, *args, **kwargs):
+            if kwargs:
+                record = orig_method.__self__.makeRecord(
+                    orig_method.__self__.name,
+                    getattr(logging, orig_method.__name__.upper()),
+                    args[0] if args else "(unknown)",
+                    args[1] if len(args) > 1 else 0,
+                    msg if args else str(msg),
+                    args[2:] if len(args) > 2 else (),
+                    None,
+                )
+                record.extra_fields = _serialize_extra(kwargs)
+                orig_method.__self__.handle(record)
+            else:
+                return orig_method(msg, *args, **kwargs)
+        return wrapped
+
+    logger.debug = _wrap(_orig_debug)
+    logger.info = _wrap(_orig_info)
+    logger.warning = _wrap(_orig_warning)
+    logger.error = _wrap(_orig_error)
+    logger.critical = _wrap(_orig_critical)
+
     return logger
+
+
+def _serialize_extra(d: dict) -> dict:
+    """Make a dict's values JSON-serializable."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (str, int, float, bool, type(None))):
+            out[k] = v
+        elif isinstance(v, list) or isinstance(v, dict):
+            try:
+                out[k] = json.dumps(v)
+            except (TypeError, ValueError):
+                out[k] = str(v)
+        else:
+            out[k] = str(v)
+    return out
 
 
 class StructuredMessage:
@@ -80,20 +119,18 @@ class StructuredMessage:
 
 
 def info(logger: logging.Logger, msg: str, **extra):
-    """Log an INFO message with extra fields."""
     record = logger.makeRecord(
         logger.name, logging.INFO, "(unknown)", 0, msg, (), None
     )
     if extra:
-        record.extra_fields = extra
+        record.extra_fields = _serialize_extra(extra)
     logger.handle(record)
 
 
 def error(logger: logging.Logger, msg: str, **extra):
-    """Log an ERROR message with extra fields (triggers notify)."""
     record = logger.makeRecord(
         logger.name, logging.ERROR, "(unknown)", 0, msg, (), None
     )
     if extra:
-        record.extra_fields = extra
+        record.extra_fields = _serialize_extra(extra)
     logger.handle(record)
