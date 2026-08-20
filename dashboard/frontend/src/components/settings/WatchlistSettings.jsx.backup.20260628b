@@ -1,0 +1,340 @@
+import React, { useState, useEffect } from 'react';
+import { fetchWatchlistFull, saveWatchlist, fetchStrategiesFull } from '../../lib/api.js';
+
+/* Strategy param metadata — mirrors the monolith for consistency */
+const STRATEGY_DEFS = {
+  SMA_Crossover:    { sma_fast:{label:'SMA Fast',default:9,step:1},sma_slow:{label:'SMA Slow',default:21,step:1},volume_mult:{label:'Volume Mult',default:1.5,step:0.1},volume_period:{label:'Volume Period',default:20,step:1} },
+  MACD_Volume:      { macd_fast:{label:'MACD Fast',default:12,step:1},macd_slow:{label:'MACD Slow',default:26,step:1},macd_signal:{label:'MACD Signal',default:9,step:1},sma_period:{label:'SMA Period',default:50,step:1} },
+  RSI_MeanReversion:{ rsi_period:{label:'RSI Period',default:7,step:1},oversold_threshold:{label:'Oversold %',default:25,step:1},overbought_threshold:{label:'Overbought %',default:80,step:1},adx_threshold:{label:'ADX Threshold',default:10,step:1},adx_period:{label:'ADX Period',default:14,step:1} },
+  Bollinger_Squeeze:{ bb_period:{label:'BB Period',default:20,step:1},bb_multiplier:{label:'BB Multiplier',default:2.0,step:0.1},squeeze_bandwidth_threshold:{label:'Squeeze BW Threshold',default:0.01,step:0.005},atr_decline_bars:{label:'ATR Decline Bars',default:10,step:1} },
+  ORB:              { orb_bars:{label:'ORB Bars',default:4,step:1},volume_mult:{label:'Volume Mult',default:1.3,step:0.1},confirm_pct:{label:'Confirm %',default:0.01,step:0.005} },
+  Donchian_Breakout:{ donchian_period:{label:'Donchian Period',default:20,step:1},atr_min:{label:'Min ATR',default:0.5,step:0.1},breakout_confirm_pct:{label:'Breakout Confirm %',default:0.01,step:0.005} },
+  RSI_Pullback:     { rsi_period:{label:'RSI Period',default:14,step:1},pullback_depth:{label:'Pullback Depth %',default:8,step:0.5},volume_confirm:{label:'Volume Confirm Mult',default:1.2,step:0.1} },
+};
+
+/* ── Inline param editor for a concrete strategy ─────────────── */
+function ParamEditor({ assetIdx, concreteName, paramKeys, currentParams, updateParam }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div style={{ marginLeft: 20 }}>
+      <button onClick={() => setExpanded(!expanded)} style={{ padding:'2px 10px',fontSize:10,background:'transparent',border:'none',color:'var(--blue)',cursor:'pointer' }}>
+        {expanded ? '▼ Hide Params' : '▶ Edit Params'}
+      </button>
+      {expanded && (
+        <div style={{ padding:'6px 10px',borderRadius:6,background:'#0a0b10',border:'1px solid var(--border)',marginTop:4 }}>
+          {Object.entries(paramKeys).map(([key, def]) => {
+            const displayValue = currentParams[key] != null ? currentParams[key] : def.default;
+            return (
+              <div key={key} style={{ display:'flex',alignItems:'center',gap:6,marginBottom:3 }}>
+                <span style={{ fontSize:10,color:'var(--muted)',minWidth:120 }}>{def.label}</span>
+                <NumInput value={numVal(displayValue)} onChange={v => updateParam(assetIdx, concreteName, key, parseFloat(v) || def.default)} step={def.step} style={{ width:72,padding:'2px 6px',fontSize:11,background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} />
+              </div>);})}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Safe value renderer for number fields (handles null/0/-20) ─ */
+function numVal(v) { return v != null ? v : ''; }
+
+/* ── Numeric input wrapper — auto-selects on focus so typing fully replaces the value ─ */
+function NumInput({ value, onChange, style, extra = {} }) {
+  const inputRef = React.useRef(null);
+  return (
+    <input
+      ref={inputRef}
+      type="text"
+      inputMode="decimal"
+      value={value ?? ''}
+      onFocus={e => { e.target.select(); }}
+      onChange={e => {
+        const raw = e.target.value;
+        if (raw === '' || raw === '-' || /^-?\d*\.?$/.test(raw)) {
+          onChange(raw);
+        }
+      }}
+      style={style}
+      {...extra}
+    />
+  );
+}
+
+/* ── Watchlist editor — big complex component ────────────────── */
+export default function WatchlistSettings() {
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveMsg, setSaveMsg] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [strategyGroups, setStrategyGroups] = useState({});
+  const [expandedAssetIdx, setExpandedAssetIdx] = useState(null);
+  const [editingOriginal, setEditingOriginal] = useState(null);
+  const [debugInfo, setDebugInfo] = useState('');
+
+  useEffect(() => {
+    fetchWatchlistFull().then(d => {
+      console.log('[WatchlistSettings] raw data:', JSON.stringify(d, null, 2));
+      setAssets(d?.assets || []);
+      setLoading(false);
+    }).catch(e => {
+      console.error('[WatchlistSettings] fetch error:', e);
+      setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    fetchStrategiesFull().then(d => {
+      console.log('[WatchlistSettings] strategy groups:', JSON.stringify(d, null, 2));
+      setStrategyGroups(d?.strategy_groups || {});
+    }).catch(e => {
+      console.error('[WatchlistSettings] strategies fetch error:', e);
+    });
+  }, []);
+
+  /* flat concrete strategy list from strategies.yaml */
+  const allConcretes = [];
+  for (const [grpName, grpData] of Object.entries(strategyGroups)) {
+    for (const sname of (grpData?.strategies || [])) {
+      allConcretes.push({ name: sname, group: grpName });
+    }
+  }
+
+  const handleSave = async () => {
+    try {
+      const res = await saveWatchlist(assets);
+      setSaveMsg('Saved OK');
+      setTimeout(() => setSaveMsg(''), 3000);
+    } catch (e) { setSaveMsg('Error: ' + e.message); }
+  };
+
+  // Save a deep copy of the current asset for cancel/restore
+  const startEditing = (idx) => {
+    setEditingOriginal(JSON.stringify(assets[idx]));
+    setExpandedAssetIdx(idx);
+  };
+
+  const handleCancel = () => {
+    if (editingOriginal !== null) {
+      const originalAssets = JSON.parse(editingOriginal);
+      setAssets(prev => {
+        const copy = [...prev];
+        copy[expandedAssetIdx] = originalAssets;
+        return copy;
+      });
+    }
+    setExpandedAssetIdx(null);
+    setEditingOriginal(null);
+  };
+
+  const updateField = (idx, field, value) => setAssets(prev => { const c = [...prev]; c[idx] = {...c[idx], [field]: value}; return c; });
+
+  const addAsset = () => setAssets(prev => [...prev, {
+    symbol: '', asset_class: 'stock', strategies: [], strategy_params: {},
+    sell_strategies: ['tp_ladder'], max_position_dollar: 100, sl_pct: -5.0, trailing_stop_pct: 2.0,
+    tp_levels: [
+      { level: 1, sell_pct: 0.25, profit_pct: 2.0 },
+      { level: 2, sell_pct: 0.5, profit_pct: 4.0 },
+      { level: 3, sell_pct: 0.25, profit_pct: 6.0 },
+    ],
+  }]);
+
+  const removeAsset = (idx) => setAssets(prev => prev.filter((_, i) => i !== idx));
+
+  const updateTpLevel = (assetIdx, li, field, val) => {
+    setAssets(prev => {
+      const c = {...prev[assetIdx]};
+      const levels = [...(c.tp_levels || [])];
+      levels[li] = {...levels[li], [field]: val};
+      return [...prev.slice(0, assetIdx), {...c, tp_levels: levels}, ...prev.slice(assetIdx + 1)];
+    });
+  };
+
+  const addTpLevel = (assetIdx) => setAssets(prev => {
+    const c = {...prev[assetIdx]};
+    const levels = [...(c.tp_levels || [])];
+    levels.push({ level: levels.length + 1, sell_pct: 0.25, profit_pct: 5.0 });
+    return [...prev.slice(0, assetIdx), {...c, tp_levels: levels}, ...prev.slice(assetIdx + 1)];
+  });
+
+  const removeTpLevel = (assetIdx, li) => setAssets(prev => {
+    const c = {...prev[assetIdx]};
+    const levels = [...(c.tp_levels || [])];
+    levels.splice(li, 1);
+    levels.forEach((l, i) => { l.level = i + 1; });
+    return [...prev.slice(0, assetIdx), {...c, tp_levels: levels}, ...prev.slice(assetIdx + 1)];
+  });
+
+  /* Toggle a single concrete strategy on/off for this asset */
+  const handleConcreteToggle = (assetIdx, concreteName, groupName) => {
+    setAssets(prev => {
+      const c = {...prev[assetIdx]};
+      const currentStrats = [...(c.strategies || [])];
+      const isGroupActive = strategyGroups[groupName]?.strategies?.includes(concreteName) && (c.strategies || []).includes(groupName);
+      const isDirectlyActive = (c.strategies || []).includes(concreteName);
+      const currentlyActive = isDirectlyActive || (isGroupActive && currentStrats.some(s => s !== groupName));
+
+      if (currentlyActive) {
+        c.strategies = currentStrats.filter(s => s !== concreteName);
+      } else {
+        const next = [...currentStrats];
+        if (!next.includes(concreteName)) next.push(concreteName);
+        if (!next.includes(groupName)) next.push(groupName);
+        c.strategies = next;
+      }
+      return [...prev.slice(0, assetIdx), c, ...prev.slice(assetIdx + 1)];
+    });
+  };
+
+  const updateStrategyParam = (assetIdx, concreteName, paramKey, val) => {
+    setAssets(prev => {
+      const c = {...prev[assetIdx]};
+      if (!c.strategy_params) c.strategy_params = {};
+      c.strategy_params[paramKey] = val;
+      return [...prev.slice(0, assetIdx), c, ...prev.slice(assetIdx + 1)];
+    });
+  };
+
+  const isConcreteActive = (asset, concreteName) => {
+    const s = asset.strategies || [];
+    if (s.includes(concreteName)) return true;
+    for (const groupName of s) {
+      if (groupName !== concreteName && strategyGroups[groupName]?.strategies?.includes(concreteName)) return true;
+    }
+    return false;
+  };
+
+  const filteredAssets = filter === 'all' ? assets : assets.filter(a => a.asset_class === filter);
+
+  // When filter changes, collapse any expanded asset that isn't in the new filtered set
+  useEffect(() => {
+    if (expandedAssetIdx !== null) {
+      const expandedAsset = assets[expandedAssetIdx];
+      if (expandedAsset && (!filteredAssets.includes(expandedAsset))) {
+        setExpandedAssetIdx(null);
+        setEditingOriginal(null);
+      }
+    }
+  }, [filter]);
+  const stockCount = assets.filter(a => a.asset_class === 'stock').length;
+  const cryptoCount = assets.filter(a => a.asset_class === 'crypto').length;
+
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading watchlist...</div>;
+
+  // Debug: show raw state for first asset
+  const firstAsset = assets[0];
+  const debugLines = [
+    `assets.length=${assets.length}`,
+    `strategyGroups keys: ${Object.keys(strategyGroups).join(', ')}`,
+    `allConcretes count: ${allConcretes.length}`,
+    ...(firstAsset ? [`AAPL strategies: [${(firstAsset.strategies||[]).join(', ')}]`, `AAPL max_pos: ${firstAsset.max_position_dollar} (type=${typeof firstAsset.max_position_dollar})`, `AAPL sl_pct: ${firstAsset.sl_pct}`, `AAPL tp_levels: ${JSON.stringify(firstAsset.tp_levels)}`] : []),
+  ];
+
+  return (
+    <>
+      {saveMsg && (
+        <div style={{ marginBottom:12,padding:'8px 16px',borderRadius:6,background:saveMsg.startsWith('Error')?'rgba(239,68,68,0.1)':'rgba(34,197,94,0.1)',border:saveMsg.startsWith('Error')?'var(--red)':'var(--green)',color:saveMsg.startsWith('Error')?'var(--red)':'var(--green)',fontSize:13 }}>{saveMsg}</div>
+      )}
+
+      {/* Debug info */}
+      <div style={{ marginBottom:12,padding:'8px 12px',borderRadius:6,background:'#0a0b10',border:'1px solid var(--border)',fontFamily:'monospace',fontSize:11,color:'var(--muted)' }}>
+        {debugLines.join('\n')}
+      </div>
+
+      <div style={{ display:'flex',gap:8,marginBottom:16 }}>
+        {[{key:'all',label:`All (${assets.length})`},{key:'stock',label:`Stock (${stockCount})`},{key:'crypto',label:`Crypto (${cryptoCount})`}].map(f => (
+          <button key={f.key} onClick={()=>setFilter(f.key)} style={{ padding:'5px 14px',background:filter===f.key?'var(--blue)':'transparent',color:filter===f.key?'#fff':'var(--muted)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:12,fontWeight:filter===f.key?600:400 }}>{f.label}</button>))}
+      </div>
+
+      <button onClick={addAsset} style={{ marginBottom:16,padding:'8px 16px',background:'var(--blue)',border:'none',borderRadius:6,color:'#fff',cursor:'pointer',fontWeight:600,fontSize:13 }}>+ Add Asset</button>
+
+      {filteredAssets.length === 0 && <div style={{ padding:24,textAlign:'center',color:'var(--muted)' }}>{assets.length===0 ? 'No assets configured.' : 'No assets match the selected filter.'}</div>}
+
+      {/* Asset list */}
+      {filteredAssets.map((asset) => {
+        const globalIdx = assets.findIndex(a => a === asset);
+        const isExpanded = expandedAssetIdx === globalIdx;
+
+        return (
+          <div key={globalIdx} style={{ marginBottom:4 }}>
+            {/* Summary row */}
+            <div onClick={() => startEditing(globalIdx)} style={{ display:'flex',justifyContent:'space-between',alignItems:'center',padding:'10px 16px',borderRadius:8,border:'1px solid var(--border)',background:isExpanded?'#0f1117':'var(--surface)',cursor:'pointer' }}>
+              <div style={{ display:'flex',alignItems:'center',gap:12 }}>
+                <span style={{ fontWeight:600,fontSize:14 }}>{asset.symbol || '(no symbol)'}</span>
+                <span style={{ fontSize:10,padding:'2px 8px',borderRadius:99,background:asset.asset_class==='crypto'?'rgba(251,191,36,0.15)':'rgba(148,163,184,0.15)',color:asset.asset_class==='crypto'?'#fbbf24':'var(--muted)' }}>{asset.asset_class}</span>
+              </div>
+              <span style={{ fontSize:11,color:'var(--muted)' }}>{(asset.tp_levels||[]).length} TP</span>
+            </div>
+
+            {/* Expanded panel */}
+            {isExpanded && (
+              <div style={{ padding:'4px 0 16px 24px',background:'#0a0b10',borderRadius:'0 0 8px 8px',border:'1px solid var(--border)',borderTop:'none' }}>
+                {/* Symbol input */}
+                <div style={{ display:'flex',gap:12,marginBottom:12,alignItems:'center' }}>
+                  <input value={asset.symbol||''} onChange={e=>updateField(globalIdx,'symbol',e.target.value)} placeholder="Symbol"
+                    style={{ fontSize:16,fontWeight:600,background:'transparent',border:'none',borderBottom:'2px solid var(--border)',color:'#e4e6eb',padding:'4px 0',width:180 }} />
+                  <button onClick={()=>removeAsset(globalIdx)} style={{ padding:'4px 12px',background:'rgba(239,68,68,0.15)',border:'1px solid var(--red)',borderRadius:4,color:'var(--red)',cursor:'pointer',fontSize:12 }}>Remove</button>
+                </div>
+
+                {/* Config fields */}
+                <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12,marginBottom:16 }}>
+                  <label style={{ fontSize:11 }}><span style={{ color:'var(--muted)' }}>Class</span>
+                    <select value={asset.asset_class||'stock'} onChange={e=>updateField(globalIdx,'asset_class',e.target.value)} style={{ width:'100%',marginTop:4,padding:'6px 8px',background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }}>
+                      <option value="stock">Stock</option><option value="crypto">Crypto</option>
+                    </select></label>
+                  <label style={{ fontSize:11 }}><span style={{ color:'var(--muted)' }}>Max Position ($)</span>
+                    <NumInput value={numVal(asset.max_position_dollar)} onChange={v=>updateField(globalIdx,'max_position_dollar',Number(v))} step="0.1" style={{ width:'100%',marginTop:4,padding:'6px 8px',background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} /></label>
+                  <label style={{ fontSize:11 }}><span style={{ color:'var(--muted)' }}>Stop Loss %</span>
+                    <NumInput value={numVal(asset.sl_pct)} onChange={v=>updateField(globalIdx,'sl_pct',Number(v))} step="0.1" style={{ width:'100%',marginTop:4,padding:'6px 8px',background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} /></label>
+                  <label style={{ fontSize:11 }}><span style={{ color:'var(--muted)' }}>Trail Stop %</span>
+                    <NumInput value={numVal(asset.trailing_stop_pct)} onChange={v=>updateField(globalIdx,'trailing_stop_pct',Number(v))} step="0.1" style={{ width:'100%',marginTop:4,padding:'6px 8px',background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} /></label>
+                </div>
+
+                {/* Strategies list */}
+                <div style={{ borderTop:'1px solid var(--border)',paddingTop:12 }}>
+                  <div style={{ fontSize:12,fontWeight:600,marginBottom:8 }}>Strategies</div>
+                  {allConcretes.length === 0 ? (
+                    <div style={{ fontSize:12,color:'var(--muted)' }}>No strategies loaded.</div>
+                  ) : allConcretes.map(({name:cname,group:grpName}) => {
+                      const active = isConcreteActive(asset, cname);
+                      const defKeys = STRATEGY_DEFS[cname] || {};
+                      return (
+                        <div key={cname} style={{ marginBottom:4 }}>
+                          <label style={{ display:'flex',alignItems:'center',gap:8,cursor:'pointer',padding:'4px 8px',borderRadius:6,background:active?'rgba(59,130,246,0.08)':'transparent' }}>
+                            <input type="checkbox" checked={active} onChange={()=>handleConcreteToggle(globalIdx,cname,grpName)} style={{ cursor:'pointer',accentColor:'var(--blue)' }} />
+                            <span style={{ fontSize:12 }}>{cname}</span>
+                            <span style={{ fontSize:10,color:'var(--muted)',marginLeft:'auto' }}>{grpName}</span>
+                          </label>
+          {active && Object.keys(defKeys).length > 0 && (
+            <ParamEditor assetIdx={globalIdx} concreteName={cname} paramKeys={defKeys} currentParams={asset.strategy_params||{}} updateParam={updateStrategyParam} />
+          )}
+                        </div>);})}
+                </div>
+
+                {/* TP Ladder */}
+                <div style={{ borderTop:'1px solid var(--border)',paddingTop:12,marginTop:12 }}>
+                  <div style={{ display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8 }}>
+                    <span style={{ fontSize:12,fontWeight:600 }}>Take Profit Ladder</span>
+                    <button onClick={()=>addTpLevel(globalIdx)} style={{ padding:'3px 10px',fontSize:11,background:'var(--blue)',border:'none',borderRadius:4,color:'#fff',cursor:'pointer' }}>+ Add</button>
+                  </div>
+                  {(asset.tp_levels||[]).map((tp,li) => (
+                    <div key={li} style={{ display:'flex',gap:8,alignItems:'center',marginBottom:4 }}>
+                      <span style={{ fontSize:11,color:'var(--muted)',minWidth:240 }}>L{tp.level}: at {tp.profit_pct}% profit sell {tp.sell_pct * 100}% of asset</span>
+                      <NumInput value={numVal(tp.sell_pct)} onChange={v=>updateTpLevel(globalIdx,li,'sell_pct',parseFloat(v)||0)} step="0.05" min="0" max="1" style={{ width:70,padding:'4px 6px',fontSize:12,background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} />
+                      <NumInput value={numVal(tp.profit_pct)} onChange={v=>updateTpLevel(globalIdx,li,'profit_pct',parseFloat(v)||0)} style={{ width:70,padding:'4px 6px',fontSize:12,background:'#0f1117',border:'1px solid var(--border)',borderRadius:4,color:'#e4e6eb' }} />
+                      {(asset.tp_levels||[]).length > 1 && <button onClick={()=>removeTpLevel(globalIdx,li)} style={{ padding:'2px 8px',fontSize:10,background:'rgba(239,68,68,0.15)',border:'none',borderRadius:4,color:'var(--red)',cursor:'pointer' }}>×</button>}
+                    </div>))}
+                </div>
+
+                {/* Save / Cancel */}
+                <div style={{ marginTop:16,display:'flex',gap:8 }}>
+                  <button onClick={handleSave} style={{ padding:'8px 20px',background:'var(--green)',border:'none',borderRadius:6,color:'#fff',fontWeight:600,cursor:'pointer' }}>Save</button>
+                  <button onClick={handleCancel} style={{ padding:'8px 20px',background:'transparent',border:'1px solid var(--border)',borderRadius:6,color:'var(--muted)',cursor:'pointer' }}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>);})}
+
+      {expandedAssetIdx === null && filteredAssets.length > 0 && <div style={{ marginTop:16,fontSize:12,color:'var(--muted)',textAlign:'center' }}>Click an asset to edit</div>}
+    </>
+  );
+}

@@ -1,0 +1,429 @@
+"""All read-only REST API endpoints."""
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "src"))
+
+from fastapi import APIRouter, Query
+from pydantic import BaseModel
+from typing import Optional
+
+from dashboard.utils.db_connector import (
+    get_open_positions, get_trades, get_total_trades_count,
+    get_equity_curve, get_latest_equity_snapshot,
+    get_strategy_signals_latest, get_engine_status,
+    get_recent_cycles, get_watchlist, get_strategy_groups,
+    get_bars_coverage, get_recent_engine_events, get_errors_by_severity,
+    get_tp_events, query_all
+)
+from dashboard.utils.alpaca_sync import get_live_prices
+
+router = APIRouter()
+
+
+# ── Helpers ────────────────────────────────────────────────────────
+
+def _position_with_live(pr):
+    """Merge DB positions with live prices. Deduplicates by base ticker."""
+    rows = get_open_positions()
+    if not rows:
+        return []
+
+    # Group duplicates by base ticker (BTC, AVAX, SOL, etc.)
+    seen = {}  # base → accumulated position dict + list of raw symbols
+    for pos in rows:
+        sym = pos["symbol"]
+        base = sym.upper()
+        for suffix in ["/USD", "/USDT", "/USDC", "USD", "USDT", "USDC"]:
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        if base not in seen:
+            seen[base] = {"base": base, "qty": 0, "cost_basis": 0.0, "avg_cost": 0.0,
+                          "symbol": sym, "asset_class": pos["asset_class"],
+                          "symbols_raw": []}
+        entry = seen[base]
+        entry["qty"] += pos["qty"]
+        entry["cost_basis"] += pos["avg_cost"] * pos["qty"]
+        # weighted average cost
+        if entry["qty"] > 0:
+            entry["avg_cost"] = entry["cost_basis"] / entry["qty"]
+        entry["symbols_raw"].append(sym)
+
+    # Fetch live prices for all raw symbols
+    all_symbols = [s for entries in seen.values() for s in entries["symbols_raw"]]
+    live = get_live_prices(all_symbols)
+
+    result = []
+    for base, entry in seen.items():
+        # Find best live price from raw symbols
+        current_price = None
+        for sym in entry["symbols_raw"]:
+            lp = live.get(sym, {})
+            p = lp.get("price")
+            if p and p > 0:
+                current_price = p
+                break
+        if not current_price:
+            current_price = entry["avg_cost"]
+
+        cost_basis = round(entry["cost_basis"], 2)
+        current_value = round(current_price * entry["qty"], 2) if current_price else 0
+        unrealized_pnl = round(current_value - cost_basis, 2)
+        pnl_pct = round((unrealized_pnl / cost_basis) * 100, 2) if cost_basis > 0 else None
+
+        result.append({
+            "symbol": base,
+            "asset_class": entry["asset_class"],
+            "qty": round(entry["qty"], 6),
+            "avg_cost": round(entry["avg_cost"], 6) if entry["avg_cost"] else None,
+            "current_price": round(current_price, 6) if current_price else None,
+            "cost_basis": cost_basis,
+            "current_value": current_value,
+            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pnl_pct": pnl_pct,
+            "current_price_live": current_price > 0,
+        })
+
+    return result
+
+
+# ── Endpoints ───────────────────────────────────────────────────────
+
+@router.get("/api/positions")
+def positions():
+    """Open positions with live Alpaca prices."""
+    return _position_with_live(None)
+
+
+@router.get("/api/trades")
+def trades(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    symbol: Optional[str] = None,
+):
+    """Trade history with pagination and filters."""
+    return {
+        "trades": get_trades(limit=limit, offset=offset, symbol=symbol),
+        "total": get_total_trades_count(),
+    }
+
+
+@router.get("/api/equity/curve")
+def equity_curve(limit: int = Query(500, ge=1)):
+    """Equity curve data."""
+    return get_equity_curve(limit=limit)
+
+
+@router.get("/api/equity/snapshot")
+def equity_snapshot():
+    """Current equity snapshot."""
+    snap = get_latest_equity_snapshot()
+    if not snap:
+        return {"error": "no data"}
+
+    account = None
+    try:
+        import sys as _sys
+        from pathlib import _Path
+        p = Path(__file__).resolve().parent.parent.parent / "src"
+        _sys.path.insert(0, str(p))
+        from persistence.credentials import load_credentials
+        from data.alpaca_rest import AlpacaRestClient
+        creds = load_credentials()
+        client = AlpacaRestClient(creds.alpaca.api_key, creds.alpaca.secret_key, creds.alpaca.paper)
+        acc = client.get_account()
+        account = {
+            "buying_power": float(acc["buying_power"]) if acc else 0,
+            "cash": float(acc.get("cash", 0)) if acc else 0,
+            "portfolio_value": float(acc["portfolio_value"]) if acc else 0,
+        }
+    except Exception:
+        pass
+
+    return {
+        "snapshot": dict(snap),
+        "account": account,
+    }
+
+
+@router.get("/api/strategies/evaluations")
+def strategies_evaluations():
+    """Latest strategy evaluations per (symbol, group)."""
+    signals = get_strategy_signals_latest()
+    result = []
+    for s in signals:
+        result.append({
+            "symbol": s["symbol"],
+            "strategy_group": s["strategy_group"],
+            "vote_result": s["vote_result"],
+            "confidence": s.get("confidence"),
+            "timestamp": s["timestamp"],
+        })
+    return result
+
+
+@router.get("/api/strategies/history")
+def strategies_history(
+    symbol: Optional[str] = None,
+    strategy_group: Optional[str] = None,
+    vote_result: Optional[str] = None,
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """Historical strategy signals with filters."""
+    conditions = []
+    params = []
+
+    if symbol:
+        conditions.append("symbol = ?")
+        params.append(symbol)
+    if strategy_group:
+        conditions.append("strategy_group = ?")
+        params.append(strategy_group)
+    if vote_result:
+        conditions.append("vote_result = ?")
+        params.append(vote_result)
+
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    sql = f"SELECT * FROM strategy_signals {where} ORDER BY timestamp DESC LIMIT ?"
+    return query_all(sql, params + [limit])
+
+
+@router.get("/api/engine/status")
+def engine_status():
+    """Engine health and cycle status."""
+    return get_engine_status()
+
+
+@router.get("/api/engine/cycle-history")
+def engine_cycle_history(limit: int = Query(30, ge=1)):
+    """Recent evaluation cycles with summaries."""
+    return get_recent_cycles(limit=limit)
+
+
+@router.get("/api/watchlist")
+def watchlist():
+    """Watchlist config from YAML."""
+    wl = get_watchlist()
+    if isinstance(wl, dict) and "error" in wl:
+        return {"error": wl["error"]}
+    return wl
+
+
+@router.get("/api/strategies/config")
+def strategies_config():
+    """Strategy group config from YAML."""
+    sg = get_strategy_groups()
+    if isinstance(sg, dict) and "error" in sg:
+        return {"error": sg["error"]}
+    return sg
+
+
+@router.get("/api/reports/positions")
+def report_positions():
+    """Position tracker formatted data (same as position_tracker.py)."""
+    return _position_with_live(None)
+
+
+@router.get("/api/reports/comprehensive")
+def report_comprehensive():
+    """Comprehensive portfolio audit data."""
+    snap = get_latest_equity_snapshot() or {}
+    positions = _position_with_live(None)
+    trades_recent = get_trades(limit=50, offset=0)
+    tp_events = get_tp_events(limit=20)
+
+    # Strategy breakdown
+    all_signals = get_strategy_signals_latest()
+
+    return {
+        "equity_snapshot": dict(snap),
+        "positions": positions,
+        "recent_trades": trades_recent,
+        "open_positions_count": len(positions),
+        "total_trades_count": get_total_trades_count(),
+        "tp_events_last_20": tp_events,
+        "strategy_evaluations_latest": all_signals,
+    }
+
+
+@router.get("/api/reports/24h-trades")
+def report_24h():
+    """Last 24h trades with cost basis and P&L."""
+    sql = """
+        SELECT t1.*, t2.symbol as buy_symbol, t2.qty as buy_qty, t2.price as buy_price,
+               t2.timestamp as buy_timestamp
+        FROM trades t1
+        LEFT JOIN trades t2 ON t1.symbol = t2.symbol AND t1.side = 'sell' AND t2.side = 'buy'
+            AND (SELECT MIN(id) FROM trades WHERE symbol = t1.symbol AND side = 'buy') <= t2.id
+        WHERE t1.timestamp >= datetime('now', '-24 hours') AND t1.status IN ('filled', 'partial_fill')
+        ORDER BY t1.id DESC
+    """
+    trades_24h = query_all(sql)
+    return {"trades": trades_24h, "count": len(trades_24h)}
+
+
+@router.get("/api/reports/strategy-all")
+def report_strategy_all():
+    """Full strategy evaluation history across all cycles."""
+    sql = """
+        SELECT vote_result, COUNT(*) as cnt FROM strategy_signals GROUP BY vote_result ORDER BY cnt DESC
+    """
+    totals = query_all(sql)
+
+    # Per-symbol breakdown
+    sym_sql = """
+        SELECT symbol, vote_result, COUNT(*) as cnt
+        FROM strategy_signals GROUP BY symbol, vote_result ORDER BY symbol, cnt DESC LIMIT 100
+    """
+    by_symbol = query_all(sym_sql)
+
+    return {"totals": totals, "by_symbol": by_symbol}
+
+
+@router.get("/api/reports/bars")
+def report_bars():
+    """Bar data coverage stats."""
+    return get_bars_coverage(limit=50)
+
+
+@router.get("/api/config")
+def config():
+    """Full system configuration."""
+    wl = get_watchlist()
+    sg = get_strategy_groups() if isinstance(get_strategy_groups(), dict) and not any(k in str(get_strategy_groups()) for k in ("error",)) else get_strategy_groups()
+
+    return {
+        "watchlist": wl,
+        "strategy_groups": sg,
+    }
+
+
+@router.get("/api/recent-events")
+def recent_events(limit: int = Query(200, ge=1)):
+    """Recent engine activity events."""
+    return get_recent_engine_events(limit=limit)
+
+
+@router.get("/api/errors-summary")
+def errors_summary():
+    """Error counts by severity."""
+    return get_errors_by_severity()
+
+
+@router.get("/api/reports/comprehensive/detailed")
+def report_comprehensive_detailed(
+    symbol: Optional[str] = None,
+    asset_class: Optional[str] = None,
+):
+    """Detailed comprehensive report data with per-asset filtering.
+    
+    Returns positions, trades (with cost-basis P&L), and strategy history,
+    all optionally filtered by asset_class or specific symbol.
+    """
+    # Positions
+    positions = _position_with_live(None)
+    if asset_class:
+        positions = [p for p in positions if p.get('asset_class','') == asset_class]
+    
+    # Closed positions with realized P&L
+    closed_sql = "SELECT * FROM positions WHERE is_closed=1 AND qty > 0"
+    closed_positions = query_all(closed_sql)
+    if asset_class:
+        closed_positions = [p for p in closed_positions if p.get('asset_class','') == asset_class]
+    if symbol:
+        closed_positions = [p for p in closed_positions if p['symbol'] == symbol]
+    
+    # All trades (for this asset or filtered)
+    trade_sql = "SELECT * FROM trades WHERE qty > 0 AND status='filled'"
+    params = []
+    if asset_class:
+        trade_sql += " AND asset_class = ?"
+        params.append(asset_class)
+    if symbol:
+        trade_sql += " AND symbol = ?"
+        params.append(symbol)
+    trade_sql += " ORDER BY timestamp DESC LIMIT 1000"
+    all_trades = query_all(trade_sql, params)
+    
+    # Build per-symbol FIFO P&L from trades
+    symbol_trades = {}
+    for t in all_trades:
+        sym = t['symbol']
+        if sym not in symbol_trades:
+            symbol_trades[sym] = []
+        symbol_trades[sym].append(t)
+    
+    # Calculate per-symbol P&L (FIFO: pair buys with sells)
+    detailed_pnl = {}
+    for sym, trades_list in symbol_trades.items():
+        opens = []  # unmatched buys
+        realized = 0.0
+        total_buy_notional = 0.0
+        total_sell_notional = 0.0
+        
+        for t in trades_list:
+            if t['side'] == 'buy':
+                opens.append(t)
+                total_buy_notional += (t['total_cost'] or 0)
+            else:  # sell
+                if opens:
+                    buy = opens.pop(0)  # FIFO
+                    pnl = (t['total_cost'] or 0) - (buy['total_cost'] or 0)
+                    realized += pnl
+        
+        unrealized_from_pos = None
+        for p in positions:
+            if p.get('base') == sym or p.get('symbol') == sym.upper():
+                # try to match
+                pass
+        
+        sell_total = sum((t.get('notional') or 0) for t in trades_list if t['side'] == 'sell')
+        detailed_pnl[sym] = {
+            'realized_pnl': round(realized, 2),
+            'total_buy_notional': round(total_buy_notional, 2),
+            'total_sell_notional': round(sell_total, 2),
+            'total_trades': len(trades_list),
+            'buy_count': sum(1 for t in trades_list if t['side'] == 'buy'),
+            'sell_count': sum(1 for t in trades_list if t['side'] == 'sell'),
+        }
+    
+    # Strategy history
+    strategy_sql = "SELECT * FROM strategy_signals"
+    strat_params = []
+    if asset_class and symbol is None:
+        # Map asset class to symbols from watchlist (it's a list)
+        wl_assets = get_watchlist()
+        if isinstance(wl_assets, dict):
+            wl_assets = wl_assets.get('assets', [])
+        symbols_for_class = []
+        for a in wl_assets:
+            sym = a.get('symbol', '')
+            if asset_class == 'crypto' and '/USD' in sym:
+                symbols_for_class.append(sym)
+            elif asset_class == 'stock' and '/' not in sym:
+                symbols_for_class.append(sym)
+        if symbols_for_class:
+            placeholders = ','.join(['?' for _ in symbols_for_class])
+            strategy_sql += f" WHERE symbol IN ({placeholders})"
+            strat_params.extend(symbols_for_class)
+    elif symbol:
+        strategy_sql += " WHERE symbol = ?"
+        strat_params.append(symbol)
+    strategy_sql += " ORDER BY timestamp DESC LIMIT 500"
+    strategy_history = query_all(strategy_sql, strat_params)
+    
+    # Summarize strategy data
+    strat_totals = {}
+    for s in strategy_history:
+        key = f"{s.get('strategy_group','')}|{s.get('vote_result','')}"
+        strat_totals[key] = strat_totals.get(key, 0) + 1
+    
+    return {
+        'positions': positions,
+        'closed_positions': closed_positions,
+        'trades': all_trades,
+        'pnl_summary': detailed_pnl,
+        'strategy_history': strategy_history,
+        'strategy_totals': strat_totals,
+        'filters_applied': {'symbol': symbol, 'asset_class': asset_class},
+    }

@@ -67,8 +67,9 @@ def _restart_engine(name, script_path):
         proc = subprocess.Popen(
             cmd,
             cwd=str(TRADE_ROOT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         pid = proc.pid
         _log.info(f"restart_engine", engine=name, pid=pid)

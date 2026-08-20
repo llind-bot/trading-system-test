@@ -1,0 +1,749 @@
+import { useEffect, useRef, useState } from 'react'
+import './index.css'
+
+function App() {
+  const [activeTab, setActiveTab] = useState('overview')
+  const [positions, setPositions] = useState(null)
+  const [equitySnap, setEquitySnap] = useState(null)
+  const [engineStatus, setEngineStatus] = useState(null)
+  const [wsStatus, setWsStatus] = useState('disconnected')
+  const wsRef = useRef(null)
+
+  useEffect(() => {
+    Promise.all([
+      fetch('/api/positions').then(r => r.json()),
+      fetch('/api/equity/snapshot').then(r => r.json()),
+      fetch('/api/engine/status').then(r => r.json()),
+    ]).then(([pos, eq, eng]) => {
+      setPositions(pos)
+      setEquitySnap(eq)
+      setEngineStatus(eng)
+    })
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(proto + '//' + location.host + '/ws/live')
+    ws.onopen = () => setWsStatus('connected')
+    ws.onmessage = (e) => {
+      const msg = JSON.parse(e.data)
+      if (msg.type === 'position_update' && msg.data) setPositions(msg.data)
+    }
+    ws.onclose = () => setWsStatus('disconnected')
+    wsRef.current = ws
+    return () => ws.close()
+  }, [])
+
+  const tabs = [
+    { id: 'overview', label: 'Overview' }, { id: 'positions', label: 'Positions' },
+    { id: 'trades', label: 'Trades' }, { id: 'strategies', label: 'Strategies' },
+    { id: 'reports', label: 'Reports' }, { id: 'engine', label: 'Engine' },
+    { id: 'settings', label: 'Settings' },
+  ]
+
+  const green = v => v >= 0 ? 'var(--green)' : 'var(--red)'
+  const posVal = positions && equitySnap ? 
+    positions.reduce((s, p) => s + (p.current_price * p.qty), 0) : 0
+
+  return (
+    <div style={{ minHeight: '100vh' }}>
+      <header style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 24px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 600 }}>Trading Dashboard</h1>
+          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 99, background: wsStatus === 'connected' ? 'var(--green)' : 'var(--red)', color: '#fff' }}>{wsStatus === 'connected' ? '\u25cf Live' : '\u25cb Offline'}</span>
+        </div>
+        {equitySnap && <div style={{ textAlign: 'right' }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)' }}>Total Equity</div>
+          <div style={{ fontSize: 20, fontWeight: 700 }}>${equitySnap.snapshot?.total_equity?.toLocaleString() ?? '-'}</div>
+        </div>}
+      </header>
+      <nav style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', padding: '0 24px', overflowX: 'auto' }}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={() => setActiveTab(t.id)} style={{
+            padding: '10px 16px', background: activeTab === t.id ? 'var(--blue)' : 'transparent',
+            color: activeTab === t.id ? '#fff' : 'var(--muted)', border: 'none',
+            borderBottom: activeTab === t.id ? '2px solid var(--blue)' : '2px solid transparent',
+            cursor: 'pointer', fontSize: 13, fontWeight: activeTab === t.id ? 600 : 400, whiteSpace: 'nowrap'
+          }}>{t.label}</button>
+        ))}
+      </nav>
+      <main style={{ padding: 24 }}>
+        {activeTab === 'overview' && <OverviewView positions={positions} equitySnap={equitySnap} engineStatus={engineStatus} posVal={posVal} green={green} />}
+        {activeTab === 'positions' && <PositionsPage positions={positions} />}
+        {activeTab === 'trades' && <TradesPage />}
+        {activeTab === 'strategies' && <StrategiesPage />}
+        {activeTab === 'reports' && <ReportsPage />}
+        {activeTab === 'engine' && <EnginePage engineStatus={engineStatus} />}
+        {activeTab === 'settings' && <SettingsPage />}
+      </main>
+    </div>
+  )
+}
+
+function OverviewView({ positions, equitySnap, engineStatus, posVal, green }) {
+  const cash = equitySnap?.snapshot?.cash ?? '-'
+  const bp = equitySnap?.account?.buying_power ?? '-'
+  return (<>
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: 16, marginBottom: 24 }}>
+      {[{ label: 'Cash', value: '$' + cash.toLocaleString(), sub: '' },
+        { label: 'Positions Value', value: '$' + posVal.toLocaleString(undefined, { maximumFractionDigits: 2 }), sub: (positions?.length ?? 0) + ' open' },
+        { label: 'Buying Power', value: '$' + bp.toLocaleString(), sub: '' }].map(c => (
+        <div key={c.label} style={{ background: 'var(--surface)', padding: 16, borderRadius: 8, border: '1px solid var(--border)' }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>{c.label}</div>
+          <div style={{ fontSize: 22, fontWeight: 700 }}>{c.value}</div>
+          {c.sub && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>{c.sub}</div>}
+        </div>))}
+    </div>
+    <div style={{ background: 'var(--surface)', padding: 16, borderRadius: 8, border: '1px solid var(--border)', marginBottom: 24 }}>
+      <h3 style={{ margin: '0 0 8px', fontSize: 14 }}>Engine Status</h3>
+      {engineStatus?.running ? (
+        <><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--green)', marginRight: 8 }}></span>
+          Running (PID {engineStatus.pid}, Uptime: {engineStatus.uptime ?? '-'})</>
+      ) : <><span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: 'var(--red)', marginRight: 8 }}></span>Stopped / Unavailable</>}
+    </div>
+    <h3 style={{ fontSize: 14, marginBottom: 8 }}>Positions ({(positions?.length) ?? 0})</h3>
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+        <thead><tr style={{ borderBottom: '1px solid var(--border)' }}>
+          {['Symbol','Qty','Avg Cost','Cost Basis','Current','Value','MtM $','MtM %'].map(h => <th key={h} style={{ padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>)}</tr></thead>
+        <tbody>{positions?.map(p => (
+          <tr key={p.symbol} style={{ borderBottom:'1px solid var(--border)' }}>
+            <td style={{ padding:'8px 12',fontWeight:600 }}>{p.symbol}</td>
+            <td style={{ padding:'8px 12' }}>{p.qty.toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+            <td style={{ padding:'8px 12' }}>${(p.avg_cost ?? '-').toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>${(p.cost_basis ?? '-').toLocaleString()}</td>
+            <td style={{ padding:'8px 12' }}>${(p.current_price ?? '-').toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>${(p.current_value ?? '-').toLocaleString()}</td>
+            <td style={{ padding:'8px 12', color:green(p.unrealized_pnl) }}>${(p.unrealized_pnl != null ? p.unrealized_pnl.toFixed(2) : '-')}</td>
+            <td style={{ padding:'8px 12', color:green(p.unrealized_pnl_pct), fontWeight:600 }}>{p.unrealized_pnl_pct != null ? p.unrealized_pnl_pct.toFixed(2)+'%' : '-'}</td>
+          </tr>)})}
+        </tbody></table>
+      </div>
+    </>)
+}
+
+function PositionsPage({ positions }) {
+  return (<>
+    <h2 style={{ margin:'0 0 16px',fontSize:18 }}>Positions</h2>
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%',borderCollapse:'collapse',fontSize:13 }}>
+        <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+          {['Symbol','Class','Qty','Avg Cost','Cost Basis','Current','Value','MtM $','MtM %'].map(h => <th key={h} style={{ padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>)}</tr></thead>
+        <tbody>{positions?.map(p => (
+          <tr key={p.symbol} style={{ borderBottom:'1px solid var(--border)' }}>
+            <td style={{ padding:'8px 12',fontWeight:600 }}>{p.symbol}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>{p.asset_class}</td>
+            <td style={{ padding:'8px 12' }}>{p.qty.toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+            <td style={{ padding:'8px 12' }}>${(p.avg_cost ?? '-').toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>${(p.cost_basis ?? '-').toLocaleString()}</td>
+            <td style={{ padding:'8px 12' }}>${(p.current_price ?? '-').toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>${(p.current_value ?? '-').toLocaleString()}</td>
+            <td style={{ padding:'8px 12',color:p.unrealized_pnl>=0?'var(--green)':'var(--red)' }}>${Math.abs(p.unrealized_pnl||0).toFixed(2)}{p.unrealized_pnl >= 0 ? '+' : '-'}</td>
+            <td style={{ padding:'8px 12',color:p.unrealized_pnl_pct>=0?'var(--green)':'var(--red)',fontWeight:600 }}>{p.unrealized_pnl_pct != null ? p.unrealized_pnl_pct.toFixed(2)+'%' : '-'}</td>
+          </tr>)})}
+        </tbody></table></div></>)
+}
+
+function TradesPage() {
+  const [trades, setTrades] = useState(null); const [loading, setLoading] = useState(true)
+  useEffect(() => { fetch('/api/trades?limit=100').then(r=>r.json()).then(setTrades).finally(()=>setLoading(false)) }, [])
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading trades...</div>
+  return (<>
+    <h2 style={{ margin:'0 0 16px',fontSize:18 }}>Recent Trades ({(trades?.total) ?? 0})</h2>
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%',borderCollapse:'collapse',fontSize:13 }}>
+        <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+          {['Symbol','Side','Qty','Price','Status','Timestamp'].map(h => <th key={h} style={{ padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>)}</tr></thead>
+        <tbody>{(trades?.trades || []).slice(0,50).map((t,i) => (
+          <tr key={i} style={{ borderBottom:'1px solid var(--border)' }}>
+            <td style={{ padding:'8px 12',fontWeight:600 }}>{t.symbol}</td>
+            <td style={{ padding:'8px 12',color:t.side==='buy'?'var(--green)':'var(--red)' }}>{(t.side || '').toUpperCase()}</td>
+            <td style={{ padding:'8px 12' }}>{(t.qty || '-').toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+            <td style={{ padding:'8px 12' }}>${(t.price != null ? t.price.toLocaleString(undefined,{maximumFractionDigits:6}) : '-')}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>{t.status || '-'}</td>
+            <td style={{ padding:'8px 12',color:'var(--muted)' }}>{t.timestamp || '-'}</td>
+          </tr>)})}
+        </tbody></table></div></>)
+}
+
+function StrategiesPage() {
+  const [evals, setEvals] = useState(null); const [loading, setLoading] = useState(true)
+  useEffect(() => { fetch('/api/strategies/evaluations').then(r=>r.json()).then(setEvals).finally(()=>setLoading(false)) }, [])
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading strategies...</div>
+  const voteColor = v => v==='BUY'?'var(--green)':v==='SELL'?'var(--red)':'var(--muted)'
+  const grouped = {}; evals?.forEach(e => { if (!grouped[e.symbol]) grouped[e.symbol]=[]; grouped[e.symbol].push(e) })
+  return (<>
+    <h2 style={{ margin:'0 0 16px',fontSize:18 }}>Strategy Evaluations</h2>
+    <div style={{ overflowX:'auto' }}>
+      <table style={{ width:'100%',borderCollapse:'collapse',fontSize:13 }}>
+        <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+          <th style={{ padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>Symbol</th>
+          {(evals || []).map((e,idx) => idx===0 ? evals.map(e=>e.strategy_group).filter((v,j,a)=>a.indexOf(v)===j).map(g=><th key={g} style={{ padding:'8px 12px',textAlign:'center',color:'var(--muted)',fontWeight:500 }}>{g}</th>) : null)}
+        </tr></thead>
+        <tbody>{Object.entries(grouped).map(([sym,group]) => (
+          <tr key={sym} style={{ borderBottom:'1px solid var(--border)' }}>
+            <td style={{ padding:'8px 12',fontWeight:600 }}>{sym}</td>
+            {(evals||[]).map(e=>e.strategy_group).filter((v,j,a)=>a.indexOf(v)===j).map(g => {
+              const ev = group.find(x=>x.strategy_group===g)
+              return <td key={g} style={{ padding:'8px 12',textAlign:'center' }}><span style={{ color:voteColor(ev?.vote_result),fontWeight:600 }}>{ev ? ev.vote_result : '-'}</span></td>
+            })}
+          </tr>)})}
+        </tbody></table></div></>)
+}
+
+function ReportsPage() {
+  const [activeReport, setActiveReport] = useState('comprehensive')
+  const reportTabs = [{id:'comprehensive',label:'Comprehensive'},{id:'positions',label:'Position Tracker'},{id:'24h',label:'24h Trades'},{id:'strategy',label:'Strategy History'},{id:'bars',label:'Bar Coverage'}]
+  return (<>
+    <h2 style={{ margin:'0 0 16px',fontSize:18 }}>Reports</h2>
+    <div style={{ display:'flex',gap:4,marginBottom:20,borderBottom:'1px solid var(--border)',paddingBottom:0 }}>
+      {reportTabs.map(r => (
+        <button key={r.id} onClick={()=>setActiveReport(r.id)} style={{ padding:'6px 14px',background:activeReport===r.id?'var(--blue)':'transparent',color:activeReport===r.id?'#fff':'var(--muted)',border:'none',borderBottom:activeReport===r.id?'2px solid var(--blue)':'2px solid transparent',cursor:'pointer',fontSize:12,fontWeight:activeReport===r.id?600:400,borderRadius:'4px 4px 0 0' }}>{r.label}</button>
+      ))}
+    </div>
+    {activeReport==='comprehensive' && <ComprehensiveReport/>}
+    {activeReport==='positions' && <PositionTrackerReport/>}
+    {activeReport==='24h' && <Trades24hReport/>}
+    {activeReport==='strategy' && <StrategyHistoryReport/>}
+    {activeReport==='bars' && <BarsCoverageReport/>}
+  </>)
+}
+
+function ComprehensiveReport() {
+  const [data,setData]=useState(null); const [loading,setLoading]=useState(true)
+  useEffect(()=>{fetch('/api/reports/comprehensive').then(r=>r.json()).then(setData).finally(()=>setLoading(false))},[])
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading...</div>
+  const snap=data?.equity_snapshot||{}, positions=(data?.positions)||[]
+  const tCB=positions.reduce((s,p)=>s+(p.cost_basis||0),0), tCV=positions.reduce((s,p)=>s+(p.current_value||0),0), totalUnrealized=positions.reduce((s,p)=>s+(p.unrealized_pnl||0),0)
+  return (<>
+    <h3 style={{ fontSize:16,marginBottom:12 }}>Portfolio Overview</h3>
+    <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:24 }}>
+      <StatCard label="Total Equity" value={'$'+(snap.total_equity != null ? snap.total_equity.toLocaleString() : '-')} />
+      <StatCard label="Cash" value={'$'+(snap.cash != null ? snap.cash.toLocaleString() : '-')} />
+      <StatCard label="Positions Value" value={'$'+tCV.toLocaleString(undefined,{maximumFractionDigits:2})} />
+      <StatCard label="Total Cost Basis" value={'$'+tCB.toLocaleString(undefined,{maximumFractionDigits:2})} />
+      <StatCard label="Unrealized P&L" value={'$'+totalUnrealized.toFixed(2)} color={totalUnrealized>=0?'var(--green)':'var(--red)'} />
+      <StatCard label="Open Positions" value={positions.length} />
+      <StatCard label="Total Trades" value={data?.total_trades_count != null ? data.total_trades_count : '-'} />
+    </div>
+  </>)
+}
+
+function PositionTrackerReport() {
+  const [positions, setPositions] = useState(null); const [loading, setLoading] = useState(true)
+  useEffect(() => { fetch('/api/positions').then(r=>r.json()).then(setPositions).finally(()=>setLoading(false)) }, [])
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading...</div>
+  const totalUnrealized = positions.reduce((s,p)=>s+(p.unrealized_pnl||0),0), totalCostBasis = positions.reduce((s,p)=>s+(p.cost_basis||0),0)
+  return (<>
+    <h3 style={{ fontSize:16,marginBottom:8 }}>Position Tracker</h3>
+    <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:20 }}>
+      <StatCard label="Total Cost Basis" value={'$'+totalCostBasis.toLocaleString(undefined,{maximumFractionDigits:2})}/>
+      <StatCard label="Total Current Value" value={'$'+positions.reduce((s,p)=>s+(p.current_value||0),0).toLocaleString(undefined,{maximumFractionDigits:2})}/>
+      <StatCard label="Unrealized P&L" value={'$'+totalUnrealized.toFixed(2)} color={totalUnrealized>=0?'var(--green)':'var(--red)'}/>
+    </div>
+  </>)
+}
+
+function Trades24hReport() {
+  const [data,setData]=useState(null);const[loading,setLoading]=useState(true)
+  useEffect(()=>{fetch('/api/reports/24h-trades').then(r=>r.json()).then(setData).finally(()=>setLoading(false))},[])
+  if(loading)return <div style={{color:'var(--muted)'}}>Loading...</div>
+  const trades=(data?.trades)||[],totalPnl=trades.reduce((s,t)=>{const pnl=parseFloat(t.pnl_dollars||t.unrealized_pnl||t.pnl||0);return s+(isNaN(pnl)?0:pnl)},0)
+  return (<>
+    <h3 style={{fontSize:16,marginBottom:8}}>Last 24 Hours Trades ({trades.length})</h3>
+    {totalPnl!==0 && <div style={{marginBottom:16,padding:'12px 16px',borderRadius:8}}><span style={{color:totalPnl>=0?'var(--green)':'var(--red)',fontWeight:600}}>Total P&L: $'+Math.abs(totalPnl).toFixed(2)+'{totalPnl<0?'':'+'}</span></div>}
+    {trades.length===0 && <div style={{padding:24,textAlign:'center',color:'var(--muted)'}}>No trades in the last 24 hours</div>}
+    {trades.length>0 && <div style={{overflowX:'auto',background:'var(--surface)',padding:16,borderRadius:8,border:'1px solid var(--border)'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}><thead><tr style={{borderBottom:'1px solid var(--border)'}}>
+        {['Symbol','Side','Qty','Price','Status','Timestamp','P&L'].map(h=><th key={h} style={{padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500}}>{h}</th>)}</tr></thead>
+      <tbody>{trades.map((t,i)=>(<tr key={i} style={{borderBottom:'1px solid var(--border)'}}>
+        <td style={{padding:'8px 12',fontWeight:600}}>{t.symbol}</td>
+        <td style={{padding:'8px 12',color:t.side==='buy'?'var(--green)':'var(--red)'}}>{(t.side||'').toUpperCase()}</td>
+        <td style={{padding:'8px 12'}}>{(t.qty||'-').toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+        <td style={{padding:'8px 12'}}>${(t.price!=null ? t.price.toLocaleString(undefined,{maximumFractionDigits:6}) : '-')}</td>
+        <td style={{padding:'8px 12',color:'var(--muted)'}}>{t.status || '-'}</td>
+        <td style={{padding:'8px 12',color:'var(--muted)',fontSize:12}}>{t.timestamp || '-'}</td>
+        <td style={{padding:'8px 12'}}>${(parseFloat(t.pnl_dollars||t.unrealized_pnl||0)).toFixed(2)}</td>
+      </tr>))}</tbody></table></div>}
+  </>)
+}
+
+function StrategyHistoryReport() {
+  const [data,setData]=useState(null);const[loading,setLoading]=useState(true)
+  useEffect(()=>{fetch('/api/reports/strategy-all').then(r=>r.json()).then(setData).finally(()=>setLoading(false))},[])
+  if(loading)return <div style={{color:'var(--muted)'}}>Loading...</div>
+  const totals=(data?.totals)||[],bySymbol=(data?.by_symbol)||[]
+  return (<>
+    <h3 style={{fontSize:16,marginBottom:8}}>Strategy Evaluation Summary</h3>
+    <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:12,marginBottom:24}}>
+      {totals.map(t=><StatCard key={t.vote_result} label={t.vote_result+' Signals'} value={t.cnt} color={t.vote_result==='BUY'?'var(--green)':t.vote_result==='SELL'?'var(--red)':'var(--muted)'}/>)}
+    </div>
+  </>)
+}
+
+function BarsCoverageReport() {
+  const [data,setData]=useState(null);const[loading,setLoading]=useState(true)
+  useEffect(()=>{fetch('/api/reports/bars').then(r=>r.json()).then(setData).finally(()=>setLoading(false))},[])
+  if(loading)return <div style={{color:'var(--muted)'}}>Loading...</div>
+  const bars=Array.isArray(data)?data:[]
+  return (<><h3 style={{fontSize:16,marginBottom:8}}>Bar Data Coverage</h3>
+    {bars.length===0&&<div style={{padding:24,textAlign:'center',color:'var(--muted)'}}>No bar data available</div>}
+    {bars.length>0&&<div style={{overflowX:'auto',background:'var(--surface)',padding:16,borderRadius:8,border:'1px solid var(--border)'}}>
+      <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}><thead><tr style={{borderBottom:'1px solid var(--border)'}}>
+        {['Symbol','Timeframe','Bar Count','Price Range','Volume'].map(h=><th key={h} style={{padding:'8px 12px',textAlign:'left',color:'var(--muted)',fontWeight:500}}>{h}</th>)}</tr></thead>
+      <tbody>{bars.map((b,i)=>(<tr key={i} style={{borderBottom:'1px solid var(--border)'}}>
+        <td style={{padding:'8px 12',fontWeight:600}}>{b.symbol}</td>
+        <td style={{padding:'8px 12',color:'var(--muted)'}}>{b.timeframe||b.timeframe_str||'-'}</td>
+        <td style={{padding:'8px 12'}}>{(b.bar_count!=null?b.bar_count.toLocaleString():'-')}</td>
+        <td style={{padding:'8px 12',color:'var(--muted)'}}>{b.high != null ? '$'+b.high.toFixed(4) : '-'} - {b.low != null ? '$'+b.low.toFixed(4) : '-'}</td>
+        <td style={{padding:'8px 12',color:'var(--muted)'}}>{(b.total_volume||b.volume||'-').toLocaleString()}</td>
+      </tr>))}</tbody></table></div>}</>)
+}
+
+function StatCard({label,value,color}) { return (
+  <div style={{background:'var(--surface)',padding:'14px 16px',borderRadius:8,border:'1px solid var(--border)'}}>
+    <div style={{fontSize:11,color:'var(--muted)',marginBottom:4}}>{label}</div>
+    <div style={{fontSize:20,fontWeight:700,color:color||'var(--text)'}}>{value}</div>
+  </div>)
+}
+
+function EnginePage({engineStatus}) {
+  const [events,setEvents]=useState(null);const[loading,setLoading]=useState(true)
+  useEffect(()=>{Promise.all([fetch('/api/recent-events?limit=50').then(r=>r.json()),fetch('/api/engine/cycle-history?limit=20').then(r=>r.json())]).then(([ev,cycles])=>{setEvents(ev);window._cycles=cycles;setLoading(false)})},[])
+  if(loading)return <div style={{color:'var(--muted)'}}>Loading...</div>
+  const handleRestart = async ()=>{if(!confirm('Restart the trading engine?'))return;try{const res=await fetch('/api/engine/restart',{method:'POST'});alert(res.ok?'Engine restart triggered.':(await res.text()))}catch(e){alert('Error: '+e.message)}}
+  return (<><h2 style={{margin:'0 0 16px',fontSize:18}}>Engine</h2>
+    <div style={{background:'var(--surface)',padding:16,borderRadius:8,border:'1px solid var(--border)',marginBottom:20,display:'flex',alignItems:'center',gap:16}}>
+      {engineStatus?.running?<><span style={{width:12,height:12,borderRadius:'50%',background:'var(--green)'}}></span>Running</>:<><span style={{width:12,height:12,borderRadius:'50%',background:'var(--red)'}}></span>Stopped</>}
+      {engineStatus?.pid && <span>PID: {engineStatus.pid}</span>}
+      <button onClick={handleRestart} style={{marginLeft:'auto',padding:'6px 16px',background:'var(--amber)',border:'none',borderRadius:6,color:'#000',fontWeight:600,cursor:'pointer'}}>Restart Engine</button>
+    </div>
+    <h3 style={{fontSize:14,marginBottom:8}}>Recent Events</h3>
+    <div style={{background:'var(--surface)',padding:12,borderRadius:8,border:'1px solid var(--border)',maxHeight:300,overflowY:'auto',fontFamily:'monospace',fontSize:12}}>
+      {(events||[]).map((e,i)=><div key={i} style={{padding:'4px 0',borderBottom:'1px solid var(--border)'}}><span style={{color:'var(--muted)'}}>{e.timestamp}</span> [{(e.event_type)}] {e.details || ''}</div>)}
+    </div>
+  </>)
+}
+
+function SettingsPage() {
+  const [activeSection, setActiveSection] = useState('watchlist')
+  return (<><h2 style={{margin:'0 0 16px',fontSize:18}}>Settings</h2>
+    <div style={{display:'flex',gap:4,marginBottom:20,borderBottom:'1px solid var(--border)',paddingBottom:0}}>
+      {[{id:'watchlist',label:'Watchlist'},{id:'strategies',label:'Strategies'},{id:'system',label:'System Info'}].map(s=>(
+        <button key={s.id} onClick={()=>setActiveSection(s.id)} style={{padding:'6px 14px',background:activeSection===s.id?'var(--blue)':'transparent',color:activeSection===s.id?'#fff':'var(--muted)',border:'none',borderBottom:activeSection===s.id?'2px solid var(--blue)':'2px solid transparent',cursor:'pointer',fontSize:12,fontWeight:activeSection===s.id?600:400,borderRadius:'4px 4px 0 0'}}>{s.label}</button>
+      ))}
+    </div>
+    {activeSection==='watchlist' && <WatchlistSettings/>}
+    {activeSection==='strategies' && <StrategiesSettings/>}
+    {activeSection==='system' && <SystemInfoPage/>}
+  </>)
+}
+
+function StrategiesSettings() {
+  const [config,setConfig]=useState(null);const[loading,setLoading]=useState(true)
+  useEffect(()=>{fetch('/api/strategies-full').then(r=>r.json()).then(d=>{setConfig(d);setLoading(false)}).catch(()=>setLoading(false))},[])
+  if(loading)return <div style={{color:'var(--muted)'}}>Loading strategies...</div>
+  const groups=config?.strategy_groups||{}
+  return (<>
+    {Object.entries(groups).map(([name,g])=>(
+      <div key={name} style={{background:'var(--surface)',padding:16,borderRadius:8,border:'1px solid var(--border)',marginBottom:12}}>
+        <h3 style={{fontSize:15,margin:'0 0 4px'}}>{name}</h3>
+        {g.description && <div style={{fontSize:12,color:'var(--muted)',marginBottom:8}}>{g.description}</div>}
+        <div style={{display:'flex',gap:16}}>
+          <span style={{fontSize:12}}><span style={{color:'var(--muted)'}}>Strategies:</span> {(g.strategies||[]).join(', ')}</span>
+          <span style={{fontSize:12}}><span style={{color:'var(--muted)'}}>Vote Threshold:</span> {g.vote_threshold}</span>
+        </div>
+      </div>
+    ))}
+  </>)
+}
+
+function SystemInfoPage() {
+  return (<div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:12}}>
+    <StatCard label="Dashboard" value="Port 8081 (tailnet)"/>
+    <StatCard label="API" value="FastAPI + Uvicorn"/>
+    <StatCard label="Broker" value="Alpaca Paper"/>
+    <StatCard label="Engine" value="event_loop.py (launchd)"/>
+  </div>)
+}
+
+
+// ── Watchlist Settings (accordion: one expanded at a time) ─────
+function WatchlistSettings() {
+  const [assets, setAssets] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saveMsg, setSaveMsg] = useState('');
+  const [filter, setFilter] = useState('all');
+  const [strategyGroups, setStrategyGroups] = useState({});
+  const [expandedAsset, setExpandedAsset] = useState(null);
+
+  useEffect(() => {
+    fetch('/api/watchlist-full')
+      .then(r => r.json())
+      .then(d => { setAssets(d?.assets || []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    fetch('/api/strategies-full')
+      .then(r => r.json())
+      .then(d => setStrategyGroups(d?.strategy_groups || {}))
+      .catch(() => {});
+  }, []);
+
+  const handleSave = async () => {
+    try {
+      const res = await fetch('/api/watchlist', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assets }),
+      });
+      if (res.ok) {
+        setSaveMsg('Saved OK');
+        setTimeout(() => setSaveMsg(''), 3000);
+      }
+    } catch (e) { setSaveMsg('Error: ' + e.message); }
+  };
+
+  const addAsset = () => {
+    const newOne = {
+      symbol: '', asset_class: 'stock',
+      strategies: [], strategy_params: {},
+      sell_strategies: ['tp_ladder'], max_position_dollar: 100,
+      sl_pct: -5.0, trailing_stop_pct: 2.0,
+      tp_levels: [
+        { level: 1, sell_pct: 0.25, profit_pct: 2.0 },
+        { level: 2, sell_pct: 0.5, profit_pct: 4.0 },
+        { level: 3, sell_pct: 0.25, profit_pct: 6.0 }
+      ]
+    };
+    setAssets([...assets, newOne]);
+  };
+
+  const removeAsset = (i) => {
+    setAssets(assets.filter((_, idx) => idx !== i));
+  };
+
+  const updateField = (i, field, value) => {
+    const copy = [...assets];
+    copy[i] = { ...copy[i], [field]: value };
+    setAssets(copy);
+  };
+
+  const addTpLevel = (i) => {
+    const levels = [...(assets[i].tp_levels || [])];
+    levels.push({ level: levels.length + 1, sell_pct: 0.25, profit_pct: 5.0 });
+    updateField(i, 'tp_levels', levels);
+  };
+
+  const removeTpLevel = (i, li) => {
+    const levels = [...(assets[i].tp_levels || [])];
+    levels.splice(li, 1);
+    levels.forEach((l, idx) => { l.level = idx + 1; });
+    updateField(i, 'tp_levels', levels);
+  };
+
+  // Write a param directly to the parent asset's strategy_params
+  const setParamToAsset = (i, key, val) => {
+    setAssets(prev => {
+      const copy = [...prev];
+      const sp = copy[i].strategy_params ? Object.assign({}, copy[i].strategy_params) : {};
+      sp[key] = val;
+      copy[i] = { ...copy[i], strategy_params: sp };
+      return copy;
+    });
+  };
+
+  // Click to expand; clicking another collapses the previous (discard unsaved)
+  const handleExpand = (idx) => {
+    if (expandedAsset === idx) return;
+    setExpandedAsset(idx);
+  };
+
+  // Expose current assets state so child components can read it
+  useEffect(() => {
+    window.__watchlistAssets = assets;
+  }, [assets]);
+
+  if (loading) return <div style={{ color: 'var(--muted)' }}>Loading watchlist...</div>;
+
+  const filteredAssets = filter === 'all' ? assets : assets.filter(a => a.asset_class === filter);
+  const stockCount = assets.filter(a => a.asset_class === 'stock').length;
+  const cryptoCount = assets.filter(a => a.asset_class === 'crypto').length;
+
+  return (<>
+    {saveMsg && (
+      <div style={{ marginBottom: 12, padding: '8px 16px', borderRadius: 6,
+        background: 'rgba(34,197,94,0.1)', border: '1px solid var(--green)',
+        color: 'var(--green)', fontSize: 13 }}>{saveMsg}</div>
+    )}
+
+    <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      {[{ key: 'all', label: 'All (' + assets.length + ')' },
+        { key: 'stock', label: 'Stock (' + stockCount + ')' },
+        { key: 'crypto', label: 'Crypto (' + cryptoCount + ')' }].map(f => (
+        <button key={f.key} onClick={() => setFilter(f.key)} style={{
+          padding: '5px 14px', background: filter === f.key ? 'var(--blue)' : 'transparent',
+          color: filter === f.key ? '#fff' : 'var(--muted)', border: '1px solid var(--border)',
+          borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: filter === f.key ? 600 : 400
+        }}>{f.label}</button>
+      ))}
+    </div>
+
+    <button onClick={addAsset} style={{ marginBottom: 16, padding: '8px 16px',
+      background: 'var(--blue)', border: 'none', borderRadius: 6, color: '#fff',
+      cursor: 'pointer', fontWeight: 600, fontSize: 13 }}>+ Add Asset</button>
+
+    {filteredAssets.length === 0 && (
+      <div style={{ padding: 24, textAlign: 'center', color: 'var(--muted)' }}>
+        {assets.length === 0
+          ? 'No assets configured. Click "+ Add Asset" to get started.'
+          : 'No assets match the selected filter.'}
+      </div>
+    )}
+
+    {/* Accordion list — only one expanded at a time */}
+    {filteredAssets.map((asset, i) => {
+      const isExpanded = expandedAsset === i;
+      return (
+        <div key={i} style={{ marginBottom: 4 }}>
+          {/* Summary row — always visible */}
+          <div onClick={() => handleExpand(i)} style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            padding: '10px 16px', borderRadius: 8, border: '1px solid var(--border)',
+            background: isExpanded ? '#0f1117' : 'var(--surface)', cursor: 'pointer'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span style={{
+                fontSize: 12, color: isExpanded ? '#fff' : 'var(--muted)',
+                transform: isExpanded ? 'rotate(90deg)' : 'none',
+                transition: 'transform 0.15s', display: 'inline-block'
+              }}>{'\u25B6'}</span>
+              <span style={{ fontWeight: 600, fontSize: 14 }}>
+                {asset.symbol || '(no symbol)'}
+              </span>
+              <span style={{
+                fontSize: 10, padding: '2px 8px', borderRadius: 99,
+                background: asset.asset_class === 'crypto'
+                  ? 'rgba(251,191,36,0.15)' : 'rgba(148,163,184,0.15)',
+                color: asset.asset_class === 'crypto' ? '#fbbf24' : 'var(--muted)'
+              }}>{asset.asset_class}</span>
+              {asset.strategies && asset.strategies.length > 0 && (
+                <span style={{ fontSize: 10, color: 'var(--muted)' }}>
+                  {asset.strategies.join(', ')}
+                </span>
+              )}
+            </div>
+            <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+              {(asset.tp_levels || []).length} TP levels
+            </span>
+          </div>
+
+          {/* Expanded config panel — only for currently selected asset */}
+          {isExpanded && (
+            <div style={{ padding: '4px 0 16px 24px' }}>
+              <input
+                value={asset.symbol || ''}
+                onChange={e => updateField(i, 'symbol', e.target.value)}
+                placeholder="Enter symbol"
+                style={{
+                  fontSize: 16, fontWeight: 600, marginBottom: 12,
+                  background: 'transparent', border: 'none',
+                  borderBottom: '2px solid var(--border)', color: '#e4e6eb',
+                  padding: '4px 0', width: 300
+                }}
+              />
+              <button onClick={() => removeAsset(i)} style={{
+                marginBottom: 12, padding: '4px 12px',
+                background: 'rgba(239,68,68,0.15)', border: '1px solid var(--red)',
+                borderRadius: 4, color: 'var(--red)', cursor: 'pointer', fontSize: 12
+              }}>Remove</button>
+
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: 12, marginBottom: 16 }}>
+                <label style={{ fontSize: 11 }}>
+                  <span style={{ color: 'var(--muted)' }}>Asset Class</span>
+                  <select value={asset.asset_class} onChange={e => updateField(i, 'asset_class', e.target.value)}
+                    style={{ width: '100%', marginTop: 4, padding: '6px 8px', background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }}>
+                    <option value="stock">Stock</option><option value="crypto">Crypto</option>
+                  </select>
+                </label>
+
+                {/* Strategies — concrete toggle buttons + param editor */}
+                <div style={{ fontSize: 11 }}>
+                  <span style={{ color: 'var(--muted)' }}>Strategies</span>
+                  {strategyGroups && Object.keys(strategyGroups).length > 0 ? (
+                    <StrategyGroupToggle
+                      i={i} groups={strategyGroups} selected={asset.strategies || []}
+                      updateFn={updateField} setParamToAsset={setParamToAsset} />
+                  ) : (
+                    <div style={{ marginTop: 4, fontSize: 11, color: 'var(--muted)' }}>Loading strategies...</div>
+                  )}
+                </div>
+
+                <label style={{ fontSize: 11 }}>
+                  <span style={{ color: 'var(--muted)' }}>Max Position ($)</span>
+                  <input type="number" value={asset.max_position_dollar || ''}
+                    onChange={e => updateField(i, 'max_position_dollar', Number(e.target.value))}
+                    style={{ width: '100%', marginTop: 4, padding: '6px 8px', background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }} />
+                </label>
+                <label style={{ fontSize: 11 }}>
+                  <span style={{ color: 'var(--muted)' }}>SL %</span>
+                  <input type="number" step="0.1" value={asset.sl_pct || ''}
+                    onChange={e => updateField(i, 'sl_pct', Number(e.target.value))}
+                    style={{ width: '100%', marginTop: 4, padding: '6px 8px', background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }} />
+                </label>
+                <label style={{ fontSize: 11 }}>
+                  <span style={{ color: 'var(--muted)' }}>Trailing Stop %</span>
+                  <input type="number" step="0.1" value={asset.trailing_stop_pct || ''}
+                    onChange={e => updateField(i, 'trailing_stop_pct', Number(e.target.value))}
+                    style={{ width: '100%', marginTop: 4, padding: '6px 8px', background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }} />
+                </label>
+              </div>
+
+              {/* TP Ladder Levels */}
+              <div style={{ padding: '8px 12px', borderTop: '1px solid var(--border)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 12, fontWeight: 600 }}>Take Profit Ladder</span>
+                  <button onClick={() => addTpLevel(i)} style={{
+                    padding: '3px 10px', fontSize: 11, background: 'var(--blue)',
+                    border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer'
+                  }}>+ Add Level</button>
+                </div>
+                {(asset.tp_levels || []).length === 0 && (
+                  <div style={{ fontSize: 11, color: 'var(--muted)' }}>No TP levels. Click "+ Add Level" to create one.</div>
+                )}
+                {(asset.tp_levels || []).map((tp, li) => (
+                  <div key={li} style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, minWidth: 28 }}>L{tp.level}</span>
+                    <input type="number" step="0.05" min="0" max="1" value={tp.sell_pct || ''}
+                      onChange={e => updateTpLevel(i, li, 'sell_pct', parseFloat(e.target.value) || 0)}
+                      style={{ width: 70, padding: '4px 6px', fontSize: 12, background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }}
+                      placeholder="pct" title="Sell % of remaining qty (0-1)" />
+                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>of remaining</span>
+                    <input type="number" step="0.5" value={tp.profit_pct || ''}
+                      onChange={e => updateTpLevel(i, li, 'profit_pct', parseFloat(e.target.value) || 0)}
+                      style={{ width: 70, padding: '4px 6px', fontSize: 12, background: '#0f1117', border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }}
+                      placeholder="pct" title="Profit % to trigger" />
+                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>at profit</span>
+                    {(asset.tp_levels || []).length > 1 && (
+                      <button onClick={() => removeTpLevel(i, li)} style={{
+                        padding: '2px 8px', fontSize: 10, background: 'rgba(239,68,68,0.15)',
+                        border: 'none', borderRadius: 4, color: 'var(--red)', cursor: 'pointer'
+                      }}>{'\u00D7'}</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    })}
+
+    {expandedAsset !== null && assets.length > 0 && (
+      <button onClick={handleSave} style={{ marginTop: 16, padding: '10px 28px',
+        background: 'var(--green)', border: 'none', borderRadius: 6, color: '#fff',
+        fontWeight: 600, cursor: 'pointer' }}>
+        Save Watchlist ({assets.length} assets)
+      </button>
+    )}
+    {expandedAsset === null && filteredAssets.length > 0 && (
+      <div style={{ marginTop: 16, fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>
+        Click an asset to edit
+      </div>
+    )}
+  </>);
+}
+
+// ── Per-concrete-strategy toggle + param editor ───────────────
+const STRATEGY_DEFS = {
+  SMA_Crossover:    { sma_fast:{label:'SMA Fast',default:9,step:1},sma_slow:{label:'SMA Slow',default:21,step:1},volume_mult:{label:'Volume Mult',default:1.5,step:0.1},volume_period:{label:'Volume Period',default:20,step:1} },
+  MACD_Volume:      { macd_fast:{label:'MACD Fast',default:12,step:1},macd_slow:{label:'MACD Slow',default:26,step:1},macd_signal:{label:'MACD Signal',default:9,step:1},sma_period:{label:'SMA Period',default:50,step:1} },
+  RSI_MeanReversion:{ rsi_period:{label:'RSI Period',default:7,step:1},oversold_threshold:{label:'Oversold %',default:25,step:1},overbought_threshold:{label:'Overbought %',default:80,step:1},adx_threshold:{label:'ADX Threshold',default:10,step:1},adx_period:{label:'ADX Period',default:14,step:1} },
+  Bollinger_Squeeze:{ bb_period:{label:'BB Period',default:20,step:1},bb_multiplier:{label:'BB Multiplier',default:2.0,step:0.1},squeeze_bandwidth_threshold:{label:'Squeeze BW Threshold',default:0.01,step:0.005},atr_decline_bars:{label:'ATR Decline Bars',default:10,step:1} },
+  ORB:              { orb_bars:{label:'ORB Bars',default:4,step:1},volume_mult:{label:'Volume Mult',default:1.3,step:0.1},confirm_pct:{label:'Confirm %',default:0.01,step:0.005} },
+  Donchian_Breakout:{ donchian_period:{label:'Donchian Period',default:20,step:1},atr_min:{label:'Min ATR',default:0.5,step:0.1},breakout_confirm_pct:{label:'Breakout Confirm %',default:0.01,step:0.005} },
+};
+
+function StrategyGroupToggle({ i, groups, selected, updateFn, setParamToAsset }) {
+  const [activeStrats, setActiveStrats] = useState(() => new Set(selected || []));
+  useEffect(() => {
+    setActiveStrats(new Set(selected || []));
+  }, [selected]);
+
+  if (!groups || Object.keys(groups).length === 0) {
+    return <div style={{ marginTop: 4, fontSize: 11, color: 'var(--muted)' }}>No strategies available</div>;
+  }
+
+  const toggleConcrete = (sname, sgroup) => {
+    setActiveStrats(prev => {
+      const next = new Set(prev);
+      if (next.has(sname)) {
+        next.delete(sname);
+        // Remove group from selected only if no active strats remain in it
+        const remainingInGroup = groups[sgroup]?.strategies?.filter(s => sname !== s) || [];
+        // Simple: always keep group selected until all gone
+      } else {
+        next.add(sname);
+        // Add parent group to selection if not already there
+        if (!selected.includes(sgroup)) {
+          updateFn(i, 'strategies', [...(selected || []), sgroup]);
+        }
+      }
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      {Object.entries(groups).map(([group, g]) => {
+        if (!g.strategies || !g.strategies.length) return null;
+        return (
+          <div key={group} style={{ marginBottom: 8 }}>
+            {g.description && (
+              <div style={{ fontSize: 10, color: 'var(--muted)', marginBottom: 4 }}>({g.description})</div>
+            )}
+            {g.strategies.map(sname => {
+              const isActive = activeStrats.has(sname);
+              const defKeys = STRATEGY_DEFS[sname] || {};
+              return (
+                <div key={sname} style={{ marginLeft: 8, marginBottom: 4 }}>
+                  <button onClick={() => toggleConcrete(sname, group)} style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '3px 10px', fontSize: 11,
+                    fontWeight: isActive ? 600 : 400,
+                    background: isActive ? 'var(--blue)' : 'transparent',
+                    color: isActive ? '#fff' : 'var(--muted)',
+                    border: '1px solid ' + (isActive ? 'var(--blue)' : 'var(--border)'),
+                    borderRadius: 6, cursor: 'pointer', marginBottom: isActive ? 4 : 0, width: '100%'
+                  }}>
+                    <span>{sname}</span>
+                  </button>
+
+                  {isActive && Object.keys(defKeys).length > 0 && (
+                    <div style={{ marginLeft: 16, padding: '6px 10px', borderRadius: 6,
+                      background: '#0a0b10', border: '1px solid var(--border)' }}>
+                      {Object.entries(defKeys).map(([key, def]) => {
+                        // Read current value from parent's strategy_params via setParamToAsset
+                        const currentValue = (window.__watchlistAssets && window.__watchlistAssets[i]
+                          ? window.__watchlistAssets[i].strategy_params : {})[key];
+                        return (
+                          <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                            <span style={{ fontSize: 10, color: 'var(--muted)', minWidth: 130 }}>{def.label}</span>
+                            <input type="number" step={def.step} value={currentValue != null ? currentValue : def.default}
+                              onChange={e => setParamToAsset(i, key, parseFloat(e.target.value) || def.default)}
+                              style={{ width: 72, padding: '2px 6px', fontSize: 11, background: '#0f1117',
+                                border: '1px solid var(--border)', borderRadius: 4, color: '#e4e6eb' }} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export default App;

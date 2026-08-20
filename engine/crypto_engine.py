@@ -9,7 +9,7 @@ import os
 import signal
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 os.environ.setdefault("ALPACA_ENV", "paper")
@@ -22,7 +22,7 @@ from infra.db_pool import get_db
 from infra.logger import get_logger
 from infra.notify_engine import get_notify
 
-_log = get_logger("crypto-engine-test")
+_log = get_logger("crypto-engine")
 _notify = get_notify()
 
 
@@ -30,7 +30,7 @@ class CryptoEngine:
     def __init__(self, poll_interval: int = 30):
         self.poll_interval = poll_interval
         self._running = False
-        self.bars_db = get_db("trading")
+        self.bars_db = get_db("bars")
         self.signals_db = get_db("trades")
         self.watchlist: dict[str, dict] = {}
         self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -69,11 +69,42 @@ class CryptoEngine:
             asset_cfg = self.watchlist[symbol]
             for strat_name in asset_cfg["strategies"]:
                 try:
-                    strategy = CryptoSwingDaily(symbol=symbol)
+                    strategy = CryptoSwingDaily()
                     signal_result = strategy.evaluate(bars, asset_cfg.get("strategy_params", {}))
                     
-                    if signal_result and signal_result.get("side"):
-                        self._write_signal_to_db(symbol, signal_result)
+                    # Handle both dict-style (legacy) and StrategyResult object returns
+                    if signal_result is None:
+                        continue
+                    if hasattr(signal_result, 'signal'):
+                        # StrategyResult object
+                        side = signal_result.signal.name if signal_result.signal else None
+                        confidence = getattr(signal_result, 'confidence', 0.0)
+                        reason = getattr(signal_result, 'reason', '')
+                        strategy_name = getattr(signal_result, 'strategy', strat_name) if hasattr(signal_result, 'strategy') else strat_name
+                    else:
+                        # Dict-style (legacy)
+                        side = signal_result.get("side")
+                        confidence = signal_result.get("confidence", 0.0)
+                        reason = signal_result.get("reason", "")
+                        strategy_name = signal_result.get("strategy", strat_name)
+                    
+                    if side and side not in ("HOLD", None):
+                        # Include the last bar's close as the signal price (fallback market price)
+                        signal_price = bars[-1]["open"] if bars else 0.0
+                        
+                        self._write_signal_to_db(symbol, {
+                            "side": side,
+                            "confidence": confidence,
+                            "reason": reason,
+                            "strategy": strategy_name,
+                            "price": signal_price,
+                        })
+                    
+                    # Always log evaluation result to signal_evaluations for dashboard visibility
+                    self._log_evaluation(symbol, strat_name, side or "HOLD", confidence, reason)
+                    
+                    # Also write to engine_signals (for strategy history grid in dashboard)
+                    self._write_to_engine_signals(symbol, strat_name, side or "HOLD", confidence, reason)
                 except Exception as e:
                     _log.error("strategy_eval_error", symbol=symbol, strategy=strat_name, error=str(e))
 
@@ -83,11 +114,10 @@ class CryptoEngine:
         result = {}
         try:
             for symbol in self.watchlist.keys():
-                sym_upper = symbol.upper().replace("/", "_")
                 rows = conn.execute(
                     "SELECT timestamp, open, high, low, close, volume FROM bars_crypto "
-                    "WHERE symbol = ? AND timeframe='1m' ORDER BY timestamp ASC",
-                    (sym_upper,),
+                    "WHERE symbol = ? AND bar_type='1t' ORDER BY timestamp ASC",
+                    (symbol,),
                 ).fetchall()
                 
                 if rows:
@@ -101,20 +131,66 @@ class CryptoEngine:
         self.bars_db.checkpoint()
         return result
 
+    def _write_to_engine_signals(self, symbol: str, strategy_name: str, side: str, confidence: float, reason: str):
+        """Write evaluation to engine_signals for dashboard strategy history grid.
+
+        Uses status='eval' so the order_server (which only processes 'pending') won't consume it.
+        The dashboard's Evaluation Grid queries status IN ('eval', 'pending').
+        """
+        conn = self.signals_db.connect()
+        try:
+            conn.execute("""
+                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, timestamp)
+                VALUES (?, ?, ?, ?, 'eval', ?)
+            """, (
+                symbol,
+                side,
+                strategy_name,
+                confidence,
+                datetime.now(timezone.utc).isoformat(),
+            ))
+            conn.commit()
+        except Exception as e:
+            _log.warning("engine_signals_write_error", symbol=symbol, error=str(e))
+        finally:
+            conn.close()
+
+    def _log_evaluation(self, symbol: str, strategy_name: str, side: str, confidence: float, reason: str):
+        """Write evaluation result to signal_evaluations for dashboard."""
+        conn = self.signals_db.connect()
+        try:
+            conn.execute("""
+                INSERT INTO signal_evaluations 
+                    (symbol, strategy, side, confidence, reason, engine)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                symbol,
+                strategy_name,
+                side,
+                confidence,
+                reason[:500] if reason else '',
+                'crypto-engine',
+            ))
+            conn.commit()
+        except Exception as e:
+            _log.warning("eval_write_error", symbol=symbol, error=str(e))
+        finally:
+            conn.close()
+
     def _write_signal_to_db(self, symbol: str, signal_result: dict):
         """Write signal to DB."""
         conn = self.signals_db.connect()
         try:
             conn.execute("""
-                INSERT INTO engine_signals (timestamp, symbol, side, strategy, confidence, engine)
+                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
-                datetime.now().isoformat(),
                 symbol.upper(),
                 signal_result["side"],
                 signal_result.get("strategy", "crypto_swing_daily"),
                 signal_result.get("confidence", 0.0),
-                "crypto-engine-test",
+                'pending',
+                datetime.now(timezone.utc).isoformat(),
             ))
             conn.commit()
         finally:
@@ -127,9 +203,15 @@ class CryptoEngine:
         
         _log.info("engine_start", watchlist=list(self.watchlist.keys()))
         
+        _tick_count = 0
         while self._running:
             try:
                 await self._tick()
+                _tick_count += 1
+                if _tick_count % 6 == 0:  # Log every ~3 minutes
+                    total_bars = sum(len(v) for v in self._fetch_new_bars().values())
+                    _log.info('engine_progress', tick=_tick_count, total_bars_in_db=total_bars)
+                await asyncio.sleep(1)  # Prevent CPU burn
             except Exception:
                 err_msg = traceback.format_exc()
                 _log.error("tick_error", detail=err_msg)

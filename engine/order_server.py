@@ -186,7 +186,7 @@ class OrderServer:
         self.poll_interval = poll_interval
         self._running = False
         self.signals_db = get_db("trades")
-        self.order_pool = get_db("trading")
+        self.order_pool = get_db("bars")
         self.router = SignalRouter(self.order_pool, confidence_threshold)
 
     async def _process_signals_from_db(self) -> list[dict]:
@@ -197,7 +197,7 @@ class OrderServer:
             rows = conn.execute(
                 """SELECT id, symbol, side, strategy, confidence
                    FROM engine_signals
-                   WHERE status = 'pending'
+                   WHERE status IN ('pending', 'eval')
                    ORDER BY timestamp ASC"""
             ).fetchall()
             for row in rows:
@@ -207,6 +207,7 @@ class OrderServer:
                     "side": row[2],
                     "strategy": row[3],
                     "confidence": float(row[4]) if row[4] else 0,
+                    "reason": row[5] if len(row) > 5 else "",
                 })
 
             # Mark as processed in DB
@@ -215,7 +216,7 @@ class OrderServer:
                 placeholders = ",".join("?" for _ in ids)
                 conn.execute(
                     f"UPDATE engine_signals SET status = 'processed', processed_at = ? WHERE id IN ({placeholders})",
-                    [datetime.now().isoformat()] + ids,
+                    [datetime.now(timezone.utc).isoformat()] + ids,
                 )
                 conn.commit()
         finally:

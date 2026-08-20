@@ -11,7 +11,7 @@ import os
 import signal
 import sys
 import traceback
-from datetime import datetime, time as dt_time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -61,7 +61,7 @@ class StockEngine:
     def __init__(self, poll_interval: int = 30):
         self.poll_interval = poll_interval
         self._running = False
-        self.bars_db = get_db("trading")
+        self.bars_db = get_db("bars")
         self.signals_db = get_db("trades")
         self.watchlist: dict[str, dict] = {}
         self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
@@ -105,13 +105,88 @@ class StockEngine:
             asset_cfg = self.watchlist[symbol]
             for strat_name in asset_cfg["strategies"]:
                 try:
-                    strategy = CryptoSwingDaily(symbol=symbol)
+                    strategy = CryptoSwingDaily()
                     signal_result = strategy.evaluate(bars, asset_cfg.get("strategy_params", {}))
                     
-                    if signal_result and signal_result.get("side"):
-                        self._write_signal_to_db(symbol, signal_result)
+                    # Handle both dict-style (legacy) and StrategyResult object returns
+                    if signal_result is None:
+                        continue
+                    if hasattr(signal_result, 'signal'):
+                        side = signal_result.signal.name if signal_result.signal else None
+                        confidence = getattr(signal_result, 'confidence', 0.0)
+                        reason = getattr(signal_result, 'reason', '')
+                        strategy_name = getattr(signal_result, 'strategy', strat_name) if hasattr(signal_result, 'strategy') else strat_name
+                    else:
+                        side = signal_result.get("side")
+                        confidence = signal_result.get("confidence", 0.0)
+                        reason = signal_result.get("reason", "")
+                        strategy_name = signal_result.get("strategy", strat_name)
+                    
+                    if side and side not in ("HOLD", None):
+                        # Include the last bar's close as the signal price (fallback market price)
+                        signal_price = bars[-1]["open"] if bars else 0.0
+                        
+                        self._write_signal_to_db(symbol, {
+                            "side": side,
+                            "confidence": confidence,
+                            "reason": reason,
+                            "strategy": strategy_name,
+                            "price": signal_price,
+                        })
+                    
+                    # Always log evaluation result to signal_evaluations for dashboard visibility
+                    self._log_evaluation(symbol, strategy_name or strat_name, side or "HOLD", confidence, reason)
+                    
+                    # Also write to engine_signals (for strategy history grid in dashboard)
+                    self._write_to_engine_signals(symbol, strategy_name or strat_name, side or "HOLD", confidence, reason)
                 except Exception as e:
                     _log.error("strategy_eval_error", symbol=symbol, strategy=strat_name, error=str(e))
+
+    def _write_to_engine_signals(self, symbol: str, strategy_name: str, side: str, confidence: float, reason: str):
+        """Write evaluation to engine_signals for dashboard strategy history grid.
+
+        Uses status='eval' so the order_server (which only processes 'pending') won't consume it.
+        The dashboard's Evaluation Grid queries status IN ('eval', 'pending').
+        """
+        conn = self.signals_db.connect()
+        try:
+            conn.execute("""
+                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, timestamp)
+                VALUES (?, ?, ?, ?, 'eval', ?)
+            """, (
+                symbol,
+                side,
+                strategy_name,
+                confidence,
+                datetime.now(timezone.utc).isoformat(),
+            ))
+            conn.commit()
+        except Exception as e:
+            _log.warning("engine_signals_write_error", symbol=symbol, error=str(e))
+        finally:
+            conn.close()
+
+    def _log_evaluation(self, symbol: str, strategy_name: str, side: str, confidence: float, reason: str):
+        """Write evaluation result to signal_evaluations for dashboard."""
+        conn = self.signals_db.connect()
+        try:
+            conn.execute("""
+                INSERT INTO signal_evaluations 
+                    (symbol, strategy, side, confidence, reason, engine)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                symbol,
+                strategy_name,
+                side,
+                confidence,
+                reason[:500] if reason else '',
+                'stock-engine',
+            ))
+            conn.commit()
+        except Exception as e:
+            _log.warning("eval_write_error", symbol=symbol, error=str(e))
+        finally:
+            conn.close()
 
     def _fetch_new_bars(self) -> dict[str, list[dict]]:
         """Fetch bar data from the DB pool."""
@@ -119,11 +194,10 @@ class StockEngine:
         result = {}
         try:
             for symbol in self.watchlist.keys():
-                sym_upper = symbol.upper()
                 rows = conn.execute(
                     "SELECT timestamp, open, high, low, close, volume FROM bars_stock "
                     "WHERE symbol = ? AND timeframe='1m' ORDER BY timestamp ASC",
-                    (sym_upper,),
+                    (symbol,),
                 ).fetchall()
                 
                 if rows:
@@ -143,15 +217,15 @@ class StockEngine:
         conn = self.signals_db.connect()
         try:
             conn.execute("""
-                INSERT INTO engine_signals (timestamp, symbol, side, strategy, confidence, engine)
+                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, timestamp)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
-                datetime.now().isoformat(),
                 symbol.upper(),
                 signal_result["side"],
                 signal_result.get("strategy", "crypto_swing_daily"),
                 signal_result.get("confidence", 0.0),
-                "stock-engine-test",
+                'pending',
+                datetime.now(timezone.utc).isoformat(),
             ))
             conn.commit()
         finally:

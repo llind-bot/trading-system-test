@@ -23,7 +23,7 @@ class BarIngest:
     def __init__(self, poll_interval: int = 10):
         self.poll_interval = poll_interval
         self._running = False
-        self.bars_db = get_db("trading")
+        self.bars_db = get_db("bars")
 
     async def run(self):
         """Main event loop — fetches bars and writes to DB."""

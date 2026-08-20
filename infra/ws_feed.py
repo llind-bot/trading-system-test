@@ -1,15 +1,15 @@
 """Alpaca dual-stream WebSocket feed — stock (SIP) + crypto, independent queues.
 
-Queue-based architecture replaces legacy callback patterns. Each stream writes raw
-msgpack frames into an asyncio.Queue; consumers pull frames at their own pace.
+Mirrors the working CryptoStockWebSocketFeed from the old repo: msgpack Content-Type
+header + msgpack auth + msgpack subscribe for BOTH endpoints.
 
-Auth, subscribe, reconnect logic mirrors the real Alpaca Streams protocol.
+Added automatic reconnection with exponential backoff so streams survive transient
+disconnects (network blips, server-side drops, etc.) instead of dying silently.
 """
 
 import asyncio
 import json
 import logging
-import math
 import msgpack
 import os
 import time
@@ -20,223 +20,12 @@ from infra.logger import get_logger, StructuredMessage
 _log = get_logger("ws-feed")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _unpack_frame(raw):
+    """Unwrap a WS frame — msgpack first, fallback to JSON."""
+    if isinstance(raw, bytes):
+        return msgpack.unpackb(raw, raw=False)
+    return json.loads(raw)
 
-def _msgpack_auth(key: str, secret: str, stream_type: str = "stock") -> bytes | str:
-    """Encode the auth handshake frame.
-    
-    Stock SIP (v2/sip) accepts msgpack bytes.
-    Crypto (v1beta3/crypto/us) requires JSON text.
-    """
-    frame = {"action": "auth", "key": key, "secret": secret}
-    if stream_type == "crypto":
-        return json.dumps(frame)  # crypto endpoint expects JSON text
-    return msgpack.packb(frame)  # stock SIP accepts msgpack bytes
-
-
-def _msgpack_subscribe(stream: str, **subs) -> bytes:
-    """Encode a subscription frame for a given stream type."""
-    payload = {"action": "subscribe", f"{stream}": list(subs.get(stream, []))}
-    # merge any extra keys (e.g. quotes for stock)
-    for k, v in subs.items():
-        if k != stream:
-            payload[k] = list(v)
-    return msgpack.packb(payload)
-
-
-def _unpack_frame(raw):  # can be bytes or str (websockets 10.4 returns both)
-    """Unwrap a single WS frame.
-
-    Alpaca frames come in three forms depending on content type:
-      - JSON string → parse as JSON, possibly list-wrapped (welcome/auth/sub response)
-      - Msgpack bytes → unpack to dict
-      - Bar/trade data → msgpack bytes, each message contains ONE frame object
-    """
-    if isinstance(raw, str):
-        parsed = json.loads(raw)  # type: ignore[name-defined]
-        return parsed if not isinstance(parsed, list) else (parsed[0] if parsed else {})
-    # Bytes — try msgpack first
-    try:
-        obj = msgpack.unpackb(raw, raw=False)
-        return obj if not isinstance(obj, list) else (obj[0] if obj else {})
-    except Exception:
-        return json.loads(raw)  # type: ignore[name-defined]
-
-
-# ---------------------------------------------------------------------------
-# WSSender — one-direction queue-based WebSocket client per stream
-# ---------------------------------------------------------------------------
-
-class WSSender:
-    """Thin wrapper around the ``websockets`` protocol.
-
-    Public API is queue-driven:
-      - push bytes via :meth:`send` to an internal send-queue
-      - pull decoded frames via :meth:`recv` from a receive-queue
-    """
-
-    def __init__(self, url: str, ping_interval: float = 0):
-        self.url = url
-        self.ping_interval = ping_interval          # seconds; 0 = disable
-        self._ws = None                               # active websocket handle
-        self._send_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=128)
-        self._recv_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=512)
-        self._receiver_task: Optional[asyncio.Task] = None
-        self._connected = False
-
-    # -- public ----------------------------------------------------------
-
-    async def send(self, data: bytes) -> bool:
-        """Push *data* (raw bytes) to the stream.  Returns True on success."""
-        if self._ws is None or not self._connected:
-            return False
-        try:
-            await self._send_queue.put(data)
-            return True
-        except asyncio.QueueFull:
-            _log.warning("ws_send_queue_full", url=self.url)
-            return False
-
-    async def recv(self, timeout: float = 1.0) -> Optional[dict]:
-        """Pull the next decoded frame (msgpack → dict).  *None* on timeout."""
-        try:
-            raw = await asyncio.wait_for(self._recv_queue.get(), timeout=timeout)
-            return _unpack_frame(raw)
-        except asyncio.TimeoutError:
-            return None
-
-    # -- internal --------------------------------------------------------
-
-    async def _writer(self) -> None:
-        """Drain _send_queue → WS send."""
-        while True:
-            data = await self._send_queue.get()
-            if self._ws is not None and self._connected:
-                try:
-                    await self._ws.send(data)
-                except Exception:
-                    break
-
-    async def start(self, timeout: float = 10.0) -> bool:
-        """Open connection, handshake (welcome → auth → subscribe), return True on success."""
-        import websockets
-
-        try:
-            self._ws = await asyncio.wait_for(
-                websockets.connect(self.url, ping_interval=self.ping_interval),
-                timeout=min(timeout, 5.0),
-            )
-        except Exception as e:
-            _log.error("ws_connect_failed", url=self.url, error=str(e))
-            return False
-
-        self._connected = True
-        self._receiver_task = asyncio.create_task(self._reader())
-        asyncio.ensure_future(self._writer())
-
-        # --- welcome frame (first frame is always server-to-client) ---
-        try:
-            welcome = await asyncio.wait_for(self._recv_queue.get(), timeout=min(timeout, 5.0))
-            _log.debug("ws_welcome", stream=self.url, frame=welcome)
-        except asyncio.TimeoutError:
-            _log.warning("ws_no_welcome", url=self.url)
-
-        # --- auth -------------------------------------------------------
-        api_key = os.environ.get("ALPACA_API_KEY", "")
-        secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
-        # Auth format depends on stream type (crypto needs JSON text, stock uses msgpack)
-        auth_frame = _msgpack_auth(api_key, secret_key, stream_type=self.url.split("/")[-2] if "stream" in self.url else "stock")
-        if isinstance(auth_frame, str):
-            await self._ws.send(auth_frame)  # JSON text for crypto
-        else:
-            await self._ws.send(auth_frame)  # msgpack bytes for stock
-
-        try:
-            auth_resp_raw = await asyncio.wait_for(self._recv_queue.get(), timeout=min(timeout - 2, 5.0))
-            
-            # Handle str vs bytes response (welcome/auth are JSON strings from Alpaca)
-            if isinstance(auth_resp_raw, str):
-                parsed = json.loads(auth_resp_raw)
-                auth_resp = parsed if not isinstance(parsed, list) else (parsed[0] if parsed else {})
-            elif isinstance(auth_resp_raw, bytes):
-                try:
-                    auth_resp = msgpack.unpackb(auth_resp_raw, raw=False)
-                except Exception:
-                    auth_resp = {}
-            else:
-                auth_resp = auth_resp_raw
-            
-            if isinstance(auth_resp, dict) and auth_resp.get("T") == "success":
-                _log.info(StructuredMessage("ws_authenticated", stream=self.url))
-            else:
-                _log.error(StructuredMessage("ws_auth_failed", frame=auth_resp))
-                # Clean up zombie receiver task before returning False
-                if self._receiver_task and not self._receiver_task.done():
-                    self._receiver_task.cancel()
-                    try: await asyncio.wait_for(self._receiver_task, timeout=1.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError): pass
-                await self.stop()
-                return False
-        except asyncio.TimeoutError:
-            _log.error(StructuredMessage("ws_auth_timeout", url=self.url))
-            if self._receiver_task and not self._receiver_task.done():
-                self._receiver_task.cancel()
-                try: await asyncio.wait_for(self._receiver_task, timeout=1.0)
-                except (asyncio.CancelledError, asyncio.TimeoutError): pass
-            await self.stop()
-            return False
-
-        return True
-
-    async def subscribe(self, **subs) -> bool:
-        """Send subscription request.  *subs* keys map to Alpaca field names."""
-        if not self._connected:
-            return False
-        # Determine the stream key for this sender based on url
-        stream_key = "trades"  # default stock-style
-        if "crypto" in self.url or "v1beta3" in self.url:
-            # For crypto, subscribe keys need proper format — pass through raw
-            subs_encoded = json.dumps({"action": "subscribe", **subs})
-            await self._ws.send(subs_encoded)
-            return True
-        else:
-            await self.send(_msgpack_subscribe(stream_key, **subs))
-        _log.info("ws_subscribed", streams={k: len(v) for k, v in subs.items()})
-        return True
-
-    def set_stale(self):
-        """Mark this stream as stale (no ticks received recently)."""
-        self._last_tick_ts = time.time()
-
-    async def stop(self) -> None:
-        """Close the WebSocket and clean up tasks."""
-        if self._receiver_task and not self._receiver_task.done():
-            self._receiver_task.cancel()
-        if self._ws:
-            await self._ws.close()
-        self._connected = False
-        self._ws = None
-
-    # -- reader (background) -------------------------------------------
-
-    async def _reader(self) -> None:
-        """Continuously read from WS → push to recv_queue.  Shed if queue > 500."""
-        import websockets
-        try:
-            async for raw in self._ws:           # type: ignore[union-attr]
-                while self._recv_queue.full():
-                    self._recv_queue.get_nowait()      # shed oldest
-                await self._recv_queue.put(raw)
-                self._connected = True
-        except (websockets.exceptions.ConnectionClosed, Exception):
-            pass
-
-
-# ---------------------------------------------------------------------------
-# WSFeed — dual-stream orchestrator
-# ---------------------------------------------------------------------------
 
 class WSFeed:
     """Alpaca dual-stream feed.  Stock (SIP) and crypto are independent."""
@@ -244,43 +33,57 @@ class WSFeed:
     STOCK_URL = "wss://stream.data.alpaca.markets/v2/sip"
     CRYPTO_URL = "wss://stream.data.alpaca.markets/v1beta3/crypto/us"
 
-    # Default fallback symbols when watchlists are empty
-    DEFAULT_STOCK_SUBS = ["AAPL", "MSFT", "GOOGL", "AMZN"]
+    DEFAULT_STOCK_SUBS = [
+        "AAPL", "MSFT", "GOOGL", "AMZN",
+        "MSTR", "SPCX", "NVDA", "V", "UNH", "PANW",
+    ]
     DEFAULT_CRYPTO_SUBS = ["BTC/USD", "ETH/USD"]
 
+    # Reconnection config
+    RECONNECT_MIN_DELAY = 2      # seconds
+    RECONNECT_MAX_DELAY = 60     # seconds
+    RECONNECT_BACKOFF_FACTOR = 1.5
+
     def __init__(self, api_key: Optional[str] = None, secret_key: Optional[str] = None):
-        # queue infrastructure per stream
-        self._stock_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=512)
-        self._crypto_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=512)
+        self._stock_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=10000)
+        self._crypto_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=10000)
 
-        # sender wrappers
-        self._stock_sender: Optional[WSSender] = None
-        self._crypto_sender: Optional[WSSender] = None
+        # API keys
+        self._api_key = api_key or os.environ.get("ALPACA_API_KEY", "")
+        self._secret_key = secret_key or os.environ.get("ALPACA_SECRET_KEY", "")
 
-        # subscription lists (populated before start)
+        # Stream refs
+        self._stock_ws = None
+        self._crypto_ws = None
+        self._stock_sender_task: Optional[asyncio.Task] = None
+        self._crypto_sender_task: Optional[asyncio.Task] = None
+        self._running = False
+
+        # Subscription lists (populated before start)
         self._stock_symbols: list[str] = []
         self._crypto_symbols: list[str] = []
 
-        # tick counters for stale detection
+        # Tick counters
         self._stock_tick_count = 0
         self._crypto_tick_count = 0
         self._last_stock_tick = time.time()
         self._last_crypto_tick = time.time()
 
+        # Reconnection state per stream
+        self._reconnect_delays: dict[str, float] = {}
+        self._stream_tasks: dict[str, asyncio.Task] = {}
+
     # -- subscription setup ----------------------------------------------
 
     def set_stock_symbols(self, symbols: list[str]) -> None:
-        """Symbols to subscribe on the stock SIP stream."""
         self._stock_symbols = list(symbols)
 
     def set_crypto_symbols(self, symbols: list[str]) -> None:
-        """Symbols to subscribe on the crypto stream."""
         self._crypto_symbols = list(symbols)
 
     # -- queue access for consumers --------------------------------------
 
-    def get_queue(self, stream: str) -> asyncio.Queue[dict]:
-        """Return the asyncio.Queue for *stream* (``"stock"`` or ``"crypto"``)."""
+    def get_queue(self, stream: str) -> asyncio.Queue[bytes]:
         if stream == "stock":
             return self._stock_queue
         elif stream == "crypto":
@@ -290,65 +93,237 @@ class WSFeed:
     # -- connection / auth -----------------------------------------------
 
     async def _try_connect(self, stream_name: str) -> bool:
-        """Connect + auth + subscribe for *stream_name*.  Returns True on success."""
+        """Connect + auth + subscribe for one stream.  Mirrors the old working code exactly."""
+        import websockets
+
         if stream_name == "stock":
             url = self.STOCK_URL
-            sender = WSSender(url, ping_interval=30.0)
+            ping_interval = 30  # SIP responds to pings
         elif stream_name == "crypto":
             url = self.CRYPTO_URL
-            sender = WSSender(url, ping_interval=0)    # Alpaca rejects client pings on crypto
+            ping_interval = None  # crypto does NOT accept client pings
         else:
             raise ValueError(stream_name)
 
-        if not await sender.start(timeout=15.0):
+        try:
+            ws = await asyncio.wait_for(
+                websockets.connect(
+                    url,
+                    extra_headers={"Content-Type": "application/msgpack"},
+                    ping_interval=ping_interval,
+                    close_timeout=5,
+                    max_queue=1024,
+                ),
+                timeout=5.0,
+            )
+        except Exception as e:
+            _log.error("ws_connect_failed", stream=stream_name, error=str(e))
             return False
 
-        # Save sender on self for health checks
         if stream_name == "stock":
-            self._stock_sender = sender
+            self._stock_ws = ws
         else:
-            self._crypto_sender = sender
+            self._crypto_ws = ws
 
-        # Subscribe — fill default fallback when list is empty
+        # 1. Welcome frame
+        try:
+            raw_welcome = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            welcome = _unpack_frame(raw_welcome)
+            if isinstance(welcome, list):
+                welcome = welcome[0]
+            if welcome.get("T") == "success" and welcome.get("msg") == "connected":
+                _log.debug("ws_connected", stream=url)
+        except asyncio.TimeoutError:
+            _log.warning("ws_no_welcome", stream=stream_name, url=url)
+
+        # 2. Auth via msgpack (SAME for both stock and crypto)
+        auth_msg = {"action": "auth", "key": self._api_key, "secret": self._secret_key}
+        await ws.send(msgpack.packb(auth_msg))
+
+        try:
+            raw_auth = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            auth_resp = _unpack_frame(raw_auth)
+            if isinstance(auth_resp, list):
+                auth_resp = auth_resp[0]
+
+            if auth_resp.get("T") == "error":
+                detail = json.dumps(auth_resp) if isinstance(auth_resp, dict) else str(auth_resp)
+                _log.error(StructuredMessage("ws_auth_failed", stream=stream_name, frame=detail))
+                await ws.close()
+                return False
+
+            if auth_resp.get("T") == "success" and auth_resp.get("msg") == "authenticated":
+                _log.info(StructuredMessage("ws_authenticated", stream=stream_name))
+        except asyncio.TimeoutError:
+            _log.error(StructuredMessage("ws_auth_timeout", stream=stream_name, url=url))
+            await ws.close()
+            return False
+
+        # 3. Subscribe via msgpack (SAME format for both)
         if stream_name == "stock":
             syms = self._stock_symbols or self.DEFAULT_STOCK_SUBS
-            quotes = [s for s in syms]  # subscribe quotes alongside trades
-            await sender.subscribe(trades=syms, quotes=quotes)
-        else:
+            sub_msg = {"action": "subscribe", "trades": syms, "quotes": syms}
+        else:  # crypto
             syms = self._crypto_symbols or self.DEFAULT_CRYPTO_SUBS
-            # Alpaca crypto: use "bars" key (not "crypto_bars") matching legacy format
-            await sender.subscribe(bars=syms)
+            sub_msg = {"action": "subscribe", "trades": syms, "quotes": syms, "bars": syms}
 
-        # Start background dispatcher for this stream
-        asyncio.ensure_future(self._dispatch(stream_name, sender))
+        await ws.send(msgpack.packb(sub_msg))
+
+        try:
+            raw_sub = await asyncio.wait_for(ws.recv(), timeout=5.0)
+            sub_resp = _unpack_frame(raw_sub)
+            if isinstance(sub_resp, list):
+                sub_resp = sub_resp[0]
+
+            trade_count = len(sub_resp.get("trades", [])) if isinstance(sub_resp, dict) else 0
+            full_sub = sub_resp if isinstance(sub_resp, dict) else {}
+            _log.info(StructuredMessage(
+                "ws_subscribed", 
+                stream=stream_name, 
+                trades=trade_count,
+                subscribed_symbols=sub_msg.get("trades", []),
+                response_keys=list(full_sub.keys()),
+                full_response=str(full_sub)[:500]
+            ))
+        except asyncio.TimeoutError:
+            _log.warning("ws_subscribe_timeout", stream=stream_name)
+
         return True
 
-    async def _dispatch(self, stream_name: str, sender: WSSender) -> None:
-        """Pull raw frames from the sender's recv_queue → push to our public queue.
-        Tracks tick counts and stale detection."""
-        target_queue = self._stock_queue if stream_name == "stock" else self._crypto_queue
+    async def _recv_loop(self, stream_name: str, ws, queue: asyncio.Queue):
+        """Persistent recv loop — push raw frames to queue. Reconnects on disconnect."""
+        import websockets as ws_module
+        delay = self.RECONNECT_MIN_DELAY
 
-        while True:
-            frame = await sender.recv(timeout=2.0)
-            if frame is None:
-                continue                        # timeout, keep looping
+        while self._running:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                # Reset reconnect delay on success
+                self._reconnect_delays[stream_name] = self.RECONNECT_MIN_DELAY
 
-            # Update tick metrics for data frames only (skip control)
-            T = frame.get("T", "?")
-            if T not in ("subscription", "success", "error"):
-                if stream_name == "stock":
-                    self._last_stock_tick = time.time()
-                    self._stock_tick_count += 1
-                else:
-                    self._last_crypto_tick = time.time()
-                    self._crypto_tick_count += 1
+                try:
+                    queue.put_nowait(raw)
+                except asyncio.QueueFull:
+                    _log.warning("ws_queue_full", stream=stream_name)
+                    while queue.qsize() > 5000:
+                        try:
+                            queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
 
-            target_queue.put_nowait(frame)
+                # Only count actual data frames (not auth/welcome/subscribe frames) as ticks.
+                # We identify data frames by checking if they look like trade/bars data.
+                try:
+                    frame = _unpack_frame(raw)
+                    is_data = False
+                    if isinstance(frame, dict):
+                        T = frame.get("T") or frame.get("type")
+                        # Trade event: has "T" in ("t", "trade")
+                        if T in ("t", "trade"):
+                            is_data = True
+                        # Crypto bar event: has nested "o" (OHLCV)
+                        elif "o" in frame and isinstance(frame.get("o"), dict):
+                            is_data = True
+                    elif isinstance(frame, list):
+                        # Check if any item in the array is data
+                        for item in frame:
+                            if isinstance(item, dict):
+                                T = item.get("T") or item.get("type")
+                                if T in ("t", "trade"):
+                                    is_data = True
+                                    break
+                                elif "o" in item and isinstance(item.get("o"), dict):
+                                    is_data = True
+                                    break
+
+                    if is_data and stream_name == "crypto":
+                        try:
+                            # Extract symbol from the frame for per-symbol tracking
+                            sym = (frame.get("S") or frame.get("s") or 
+                                   (frame.get("o", {}) if isinstance(frame, dict) else {}).get("symbol", "?"))
+                            T = frame.get("T") or frame.get("type") or "?"
+                            # Log first occurrence of each symbol per type
+                            _log.info(StructuredMessage(
+                                "ws_crypto_frame",
+                                symbol=sym,
+                                frame_type=T,
+                                raw_keys=list(frame.keys()) if isinstance(frame, dict) else len(frame),
+                                raw_sample=str(frame)[:200]
+                            ))
+                        except Exception:
+                            pass
+                    
+                    if is_data:
+                        self._stock_tick_count += 1 if stream_name == "stock" else 0
+                        self._crypto_tick_count += 1 if stream_name == "crypto" else 0
+                        now = time.time()
+                        if stream_name == "stock":
+                            self._last_stock_tick = now
+                        else:
+                            self._last_crypto_tick = now
+                except Exception:
+                    # If we can't parse it, still deliver the frame but don't count as tick
+                    pass
+
+            except asyncio.TimeoutError:
+                continue  # keep trying
+            except ws_module.exceptions.ConnectionClosed:
+                _log.info("ws_stream_closed", stream=stream_name)
+                break
+            except Exception as e:
+                _log.warning("ws_sender_loop_error", stream=stream_name, error=str(e))
+                break
+
+        # Stream died — reconnect with backoff
+        while self._running:
+            current_delay = min(delay, self.RECONNECT_MAX_DELAY)
+            _log.info(
+                "ws_reconnecting",
+                stream=stream_name,
+                delay_s=current_delay,
+            )
+            await asyncio.sleep(current_delay)
+            delay = delay * self.RECONNECT_BACKOFF_FACTOR
+
+            # Clean up old ws/task references
+            old_ws = getattr(self, f"_{stream_name}_ws")
+            if old_ws:
+                try:
+                    await old_ws.close()
+                except Exception:
+                    pass
+            old_task = getattr(self, f"_{stream_name}_sender_task", None)
+            if old_task and not old_task.done():
+                old_task.cancel()
+
+            # Clear stale tick state so we don't report stale data after reconnect
+            if stream_name == "stock":
+                self._last_stock_tick = time.time()
+            else:
+                self._last_crypto_tick = time.time()
+
+            success = await self._try_connect(stream_name)
+            if success:
+                _log.info("ws_reconnected", stream=stream_name)
+                # Start new recv loop for this stream
+                queue = self._stock_queue if stream_name == "stock" else self._crypto_queue
+                ws_ref = self._stock_ws if stream_name == "stock" else self._crypto_ws
+                task = asyncio.create_task(self._recv_loop(stream_name, ws_ref, queue))
+
+                # Store the new sender task reference for proper cleanup
+                attr = f"{stream_name}_sender_task"
+                setattr(self, attr, task)
+                self._stream_tasks[stream_name] = task
+
+                delay = self.RECONNECT_MIN_DELAY  # Reset backoff on success
+            else:
+                _log.error("ws_reconnect_failed", stream=stream_name)
+                # Don't reset delay — keep backing off
 
     # -- lifecycle -------------------------------------------------------
 
     async def start(self, timeout: float = 30.0) -> dict:
-        """Start both streams in background tasks.  Return health dict."""
+        self._running = True
         stock_ok = await self._try_connect("stock")
         crypto_ok = await self._try_connect("crypto")
 
@@ -356,31 +331,45 @@ class WSFeed:
             _log.error("ws_all_streams_failed")
             return {"stock_connected": False, "crypto_connected": False}
 
-        _log.info("ws_feed_started", stock=stock_ok, crypto=crypto_ok)
+        # Start recv loops for each connected stream
+        if stock_ok:
+            queue = self._stock_queue
+            ws_ref = self._stock_ws
+            task = asyncio.create_task(self._recv_loop("stock", ws_ref, queue))
+            self._stock_sender_task = task
+            self._stream_tasks["stock"] = task
+
+        if crypto_ok:
+            queue = self._crypto_queue
+            ws_ref = self._crypto_ws
+            task = asyncio.create_task(self._recv_loop("crypto", ws_ref, queue))
+            self._crypto_sender_task = task
+            self._stream_tasks["crypto"] = task
+
+        _log.info(
+            "ws_feed_started",
+            stock=stock_ok,
+            crypto=crypto_ok,
+        )
         return self.health()
 
     async def stop(self) -> None:
-        """Graceful shutdown of all streams and queues."""
-        for s in (self._stock_sender, self._crypto_sender):
-            if s:
-                await s.stop()
-        # Drain / close queues
-        while not self._stock_queue.empty():
-            try:
-                self._stock_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        while not self._crypto_queue.empty():
-            try:
-                self._crypto_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        self._running = False
+        for ws in (self._stock_ws, self._crypto_ws):
+            if ws:
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+        for stream_name, task in list(self._stream_tasks.items()):
+            if task and not task.done():
+                task.cancel()
+        self._stream_tasks.clear()
 
     def health(self) -> dict:
-        """Current connection status and tick counts."""
         return {
-            "stock_connected": self._stock_sender is not None and self._stock_sender._connected if self._stock_sender else False,
-            "crypto_connected": self._crypto_sender is not None and self._crypto_sender._connected if self._crypto_sender else False,
+            "stock_connected": self._stock_ws is not None and self._running,
+            "crypto_connected": self._crypto_ws is not None and self._running,
             "stock_ticks": self._stock_tick_count,
             "crypto_ticks": self._crypto_tick_count,
             "stock_last_tick_s": round(time.time() - self._last_stock_tick, 1),
@@ -388,7 +377,6 @@ class WSFeed:
         }
 
     def is_stale(self, stream: str = "stock", threshold_s: int = 120) -> bool:
-        """Return True if no ticks received for *threshold_s* seconds."""
         last = self._last_stock_tick if stream == "stock" else self._last_crypto_tick
         return (time.time() - last) > threshold_s
 
@@ -398,18 +386,11 @@ class WSFeed:
 # ---------------------------------------------------------------------------
 
 async def drain_queue(feed: WSFeed, stream: str, *, stale_threshold: int = 120):
-    """Yield decoded frames from *stream* until *feed* is stopped.
-
-    Usage (in BarIngest, strategies, etc.):
-        async for frame in drain_queue(ws_feed, "stock"):
-            ...process...
-    """
     q = feed.get_queue(stream)
     while True:
         try:
             raw = await asyncio.wait_for(q.get(), timeout=1.0)
-            frame = _unpack_frame(raw)
-            yield frame
+            yield raw
         except asyncio.TimeoutError:
             if feed.is_stale(stream, stale_threshold):
                 _log.warning("ws_stream_stale", stream=stream)

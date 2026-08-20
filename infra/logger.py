@@ -58,6 +58,10 @@ def get_logger(name: str, tag: Optional[str] = None) -> logging.Logger:
         logger.addHandler(ch)
 
     # Wrap all level methods to support **extra fields
+    # Skip if already wrapped (prevent double-wrap on repeated get_logger calls)
+    if getattr(logger, '_wrapped', False):
+        return logger
+    
     _orig_debug = logger.debug
     _orig_info = logger.info
     _orig_warning = logger.warning
@@ -87,6 +91,7 @@ def get_logger(name: str, tag: Optional[str] = None) -> logging.Logger:
     logger.warning = _wrap(_orig_warning)
     logger.error = _wrap(_orig_error)
     logger.critical = _wrap(_orig_critical)
+    logger._wrapped = True  # marker to prevent double-wrap
 
     return logger
 

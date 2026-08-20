@@ -1,0 +1,44 @@
+import React, { useState, useEffect } from 'react';
+import { fetchReportComprehensive } from '../../lib/api.js';
+
+function StatCard({ label, value, color }) {
+  return (
+    <div style={{ background:'var(--surface)',padding:'14px 16px',borderRadius:8,border:'1px solid var(--border)' }}>
+      <div style={{ fontSize:11,color:'var(--muted)',marginBottom:4 }}>{label}</div>
+      <div style={{ fontSize:20,fontWeight:700,color:color||'var(--text)' }}>{value}</div>
+    </div>
+  );
+}
+
+export default function ComprehensiveReport() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchReportComprehensive().then(setData).finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ color:'var(--muted)' }}>Loading comprehensive report...</div>;
+  if (!data) return <div style={{ color:'var(--muted)' }}>No data available</div>;
+
+  const snap = data.equity_snapshot || {};
+  const positions = data.positions || [];
+  const totalCostBasis = positions.reduce((s, p) => s + (p.cost_basis || 0), 0);
+  const totalCurrentValue = positions.reduce((s, p) => s + (p.current_value || 0), 0);
+  const totalUnrealized = positions.reduce((s, p) => s + (p.unrealized_pnl || 0), 0);
+
+  return (
+    <>
+      <h3 style={{ fontSize:16,marginBottom:12 }}>Portfolio Overview</h3>
+      <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:24 }}>
+        <StatCard label="Total Equity" value={'$'+(snap.total_equity != null ? snap.total_equity.toLocaleString() : '-')} />
+        <StatCard label="Cash" value={'$'+(snap.cash != null ? snap.cash.toLocaleString() : '-')} />
+        <StatCard label="Positions Value" value={'$'+totalCurrentValue.toLocaleString(undefined,{maximumFractionDigits:2})} />
+        <StatCard label="Total Cost Basis" value={'$'+totalCostBasis.toLocaleString(undefined,{maximumFractionDigits:2})} />
+        <StatCard label="Unrealized P&L" value={'$'+totalUnrealized.toFixed(2)} color={totalUnrealized>=0?'var(--green)':'var(--red)'} />
+        <StatCard label="Open Positions" value={positions.length} />
+        <StatCard label="Total Trades" value={data.total_trades_count != null ? data.total_trades_count : '-'} />
+      </div>
+    </>
+  );
+}

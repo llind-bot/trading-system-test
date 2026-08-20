@@ -1,0 +1,328 @@
+import React, { useState, useEffect } from 'react';
+import { fetchReportComprehensiveDetailed } from '../../lib/api.js';
+
+/* ── Helpers ───────────────────────────────────────────────── */
+
+function StatCard({ label, value, color }) {
+  return (
+    <div style={{ background:'var(--surface)',padding:'14px 16px',borderRadius:8,border:'1px solid var(--border)' }}>
+      <div style={{ fontSize:11,color:'var(--muted)',marginBottom:4 }}>{label}</div>
+      <div style={{ fontSize:20,fontWeight:700,color:color||'var(--text)' }}>{value}</div>
+    </div>
+  );
+}
+
+function fmt$(v) {
+  if (v == null) return '-';
+  const s = v.toLocaleString(undefined,{maximumFractionDigits:2});
+  return '$'+s+(v<0?'':'');
+}
+
+const ASSET_FILTERS = [
+  {id:'all',label:'All Assets'},
+  {id:'crypto',label:'Crypto'},
+  {id:'stock',label:'Stock/US Equity'},
+];
+
+/* ── Main Component ─────────────────────────────────────────── */
+
+export default function ComprehensiveReport() {
+  const [assetFilter, setAssetFilter] = useState('all');
+  const [symbolFilter, setSymbolFilter] = useState('');
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [detailTab, setDetailTab] = useState('trades'); // trades | strategy
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchReportComprehensiveDetailed({ assetClass: assetFilter==='all'?null:assetFilter, symbol: symbolFilter||null })
+      .then(d => { if (!cancelled) setData(d); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [assetFilter, symbolFilter]);
+
+  // Build unique symbol options from positions + closed positions
+  const allSymbols = [];
+  if (data) {
+    const seen = new Set();
+    for (const p of [...(data.positions||[]), ...(data.closed_positions||[])]) {
+      const s = p.base || p.symbol;
+      if (s && !seen.has(s)) { seen.add(s); allSymbols.push(s); }
+    }
+  }
+
+  // Aggregate stats from pnl_summary
+  let totalRealizedPnl = 0, totalTrades = 0, totalBuys = 0, totalSells = 0;
+  if (data?.pnl_summary) {
+    for (const [,v] of Object.entries(data.pnl_summary)) {
+      totalRealizedPnl += v.realized_pnl || 0;
+      totalTrades += v.total_trades || 0;
+      totalBuys += v.buy_count || 0;
+      totalSells += v.sell_count || 0;
+    }
+  }
+
+  const hasData = !!data && data.trades?.length > 0;
+  const noStratData = !hasData || (data.strategy_history?.length || 0) === 0;
+
+  // ── Sub-renderers ────────────────────────────────────────
+
+  const renderPositions = () => {
+    const pos = data?.positions || [];
+    if (!pos.length) return null;
+    return (
+      <>
+        <h4 style={{ fontSize:13,margin:'0 0 8px',color:'var(--muted)' }}>Current Positions</h4>
+        <div style={{ overflowX:'auto' }}>
+          <table style={{ width:'100%',borderCollapse:'collapse',fontSize:12 }}>
+            <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+              {['Symbol','Qty','Avg Cost','Current','P\u0026L $','P\u0026L %'].map(h => (
+                <th key={h} style={{ padding:'6px 10px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>))}
+            </tr></thead>
+            <tbody>
+              {pos.map(p => {
+                const pnlPct = p.unrealized_pnl_pct;
+                return (
+                  <tr key={p.base||p.symbol} style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'6px 10px',fontWeight:600 }}>{p.base||p.symbol}</td>
+                    <td style={{ padding:'6px 10px' }}>{(p.qty??0).toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+                    <td style={{ padding:'6px 10px' }}>${(p.avg_cost!=null?fmt$(p.avg_cost):'-')}</td>
+                    <td style={{ padding:'6px 10px' }}>${(p.current_price!=null?fmt$(p.current_price):'-')}</td>
+                    <td style={{ padding:'6px 10px',color:(p.unrealized_pnl||0)>=0?'var(--green)':'var(--red)' }}>
+                      ${(p.unrealized_pnl??0).toFixed(2)}
+                    </td>
+                    <td style={{ padding:'6px 10px',fontWeight:600,color:(pnlPct||0)>=0?'var(--green)':'var(--red)' }}>
+                      {pnlPct!=null ? pnlPct.toFixed(2)+'%' : '-'}
+                    </td>
+                  </tr>);
+              })}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  };
+
+  const renderTrades = () => {
+    const trades = data?.trades || [];
+    if (!trades.length) return <div style={{padding:16,textAlign:'center',color:'var(--muted)'}}>No trade data</div>;
+    
+    // Group by symbol for P\u0026L column
+    const pnlRows = data.pnl_summary || {};
+
+    return (
+      <>
+        <h4 style={{ fontSize:13,margin:'0 0 8px',color:'var(--muted)' }}>Trade History</h4>
+        <div style={{ overflowX:'auto' }}>
+          <table style={{ width:'100%',borderCollapse:'collapse',fontSize:12 }}>
+            <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+              {['Date','Symbol','Side','Qty','Price','Total Cost','P\u0026L $','Strategy'].map(h => (
+                <th key={h} style={{ padding:'6px 8px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>))}
+            </tr></thead>
+            <tbody>
+              {trades.map((t,i) => {
+                const sym = t.symbol;
+                const pnlInfo = pnlRows[sym];
+                // Show cumulative P\u0026L at the last sell trade per symbol, and blank on buys
+                const rowPnl = (i < trades.length-1 && trades[i+1].symbol !== sym) || (pnlInfo?.sell_count === 0) ? null : 
+                  pnlInfo ? pnlInfo.realized_pnl : null;
+                return (
+                  <tr key={t.id} style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'6px 8px',color:'var(--muted)',fontStyle:'italic' }}>{new Date(t.timestamp).toLocaleString()}</td>
+                    <td style={{ padding:'6px 8px',fontWeight:600 }}>{sym}</td>
+                    <td style={{ padding:'6px 8px',color:t.side==='buy'?'var(--green)':'var(--red)',fontWeight:500,fontStyle:'italic' }}>
+                      {t.side.toUpperCase()}
+                    </td>
+                    <td style={{ padding:'6px 8px' }}>{(t.qty||0).toLocaleString(undefined,{maximumFractionDigits:6})}</td>
+                    <td style={{ padding:'6px 8px' }}>${(t.price??0).toFixed(4)}</td>
+                    <td style={{ padding:'6px 8px' }}>${((t.notional||t.total_cost||0)).toLocaleString(undefined,{maximumFractionDigits:2})}</td>
+                    <td style={{ padding:'6px 8px',color:(rowPnl||0)>=0?'var(--green)':'var(--red)',fontWeight:500 }}>
+                      {rowPnl != null ? fmt$(rowPnl) : ''}
+                    </td>
+                    <td style={{ padding:'6px 8px' }}>{t.strategy || '-'}</td>
+                  </tr>);
+              })}
+            </tbody>
+          </table>
+        </div>
+      </>
+    );
+  };
+
+  const renderStrategyHistory = () => {
+    const history = data?.strategy_history || [];
+    if (!history.length) return <div style={{padding:16,textAlign:'center',color:'var(--muted)'}}>No strategy signal data for this filter</div>;
+    
+    // Group by (symbol, strategy_group, vote_result) -> count + avg confidence
+    const grouped = {};
+    for (const s of history) {
+      const key = `${s.symbol}|${s.strategy_group}`;
+      if (!grouped[key]) grouped[key] = { symbol: s.symbol, group: s.strategy_group, votes: {}, confidences: [] };
+      const vote = s.vote_result || 'HOLD';
+      grouped[key].votes[vote] = (grouped[key].votes[vote]||0) + 1;
+      if (s.confidence != null) grouped[key].confidences.push(s.confidence);
+    }
+    
+    // Average confidence per vote type for this symbol
+    const avgConfByVote = {};
+    for (const [,v] of Object.entries(grouped)) {
+      const votesWithConf = history.filter(s => s.strategy_group === v.group && s.symbol === v.symbol && s.confidence != null);
+      // already aggregated, just use the key data
+    }
+
+    return (
+      <>
+        <h4 style={{ fontSize:13,margin:'0 0 8px',color:'var(--muted)' }}>Strategy Signal History ({history.length} signals)</h4>
+        <div style={{ overflowX:'auto' }}>
+          <table style={{ width:'100%',borderCollapse:'collapse',fontSize:12 }}>
+            <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+              {['Symbol','Strategy Group','BUY','SELL','HOLD','Avg Confidence'].map(h => (
+                <th key={h} style={{ padding:'6px 10px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>))}
+            </tr></thead>
+            <tbody>
+              {Object.values(grouped).map((g,i) => (
+                <tr key={i} style={{ borderBottom:'1px solid var(--border)' }}>
+                  <td style={{ padding:'6px 10px',fontWeight:600 }}>{g.symbol}</td>
+                  <td style={{ padding:'6px 10px' }}>{g.group}</td>
+                  <td style={{ padding:'6px 10px',color:'var(--green)' }}>{g.votes.BUY || 0}</td>
+                  <td style={{ padding:'6px 10px',color:'var(--red)' }}>{g.votes.SELL || 0}</td>
+                  <td style={{ padding:'6px 10px',color:'var(--muted)' }}>{(g.votes.HOLD != null) ? g.votes.HOLD : '-'}</td>
+                  <td style={{ padding:'6px 10px' }}>
+                    {g.confidences.length > 0 
+                      ? ((g.confidences.reduce((a,b)=>a+b,0)/g.confidences.length)*100).toFixed(1)+'%'
+                      : '-'}
+                  </td>
+                </tr>))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Raw signal scroll */}
+        <details style={{ marginTop:16 }}>
+          <summary style={{ cursor:'pointer',fontSize:12,color:'var(--muted)' }}>Show raw signals (last {Math.min(history.length,100)})</summary>
+          <div style={{ overflowX:'auto',marginTop:8 }}>
+            <table style={{ width:'100%',borderCollapse:'collapse',fontSize:11 }}>
+              <thead><tr style={{ borderBottom:'1px solid var(--border)' }}>
+                {['Timestamp','Symbol','Group','Vote','Confidence'].map(h => (
+                  <th key={h} style={{ padding:'4px 8px',textAlign:'left',color:'var(--muted)',fontWeight:500 }}>{h}</th>))}
+              </tr></thead>
+              <tbody>
+                {history.slice(0,100).map((s,i) => (
+                  <tr key={i} style={{ borderBottom:'1px solid var(--border)' }}>
+                    <td style={{ padding:'4px 8px',color:'var(--muted)' }}>{new Date(s.timestamp).toLocaleString()}</td>
+                    <td style={{ padding:'4px 8px',fontWeight:600 }}>{s.symbol}</td>
+                    <td style={{ padding:'4px 8px' }}>{s.strategy_group}</td>
+                    <td style={{ padding:'4px 8px',color:{BUY:'var(--green)',SELL:'var(--red)',HOLD:'var(--muted)'}[s.vote_result]||'var(--text)' }}>
+                      {s.vote_result}
+                    </td>
+                    <td style={{ padding:'4px 8px' }}>{s.confidence != null ? (s.confidence*100).toFixed(1)+'%' : '-'}</td>
+                  </tr>))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      </>
+    );
+  };
+
+  // ── Main render ──────────────────────────────────────────
+
+  return (
+    <>
+      {/* Filter row */}
+      <div style={{ display:'flex',gap:12,alignItems:'center',marginBottom:16,flexWrap:'wrap' }}>
+        <span style={{ fontSize:12,color:'var(--muted)',fontWeight:500 }}>Filter:</span>
+        
+        {/* Asset type */}
+        <div style={{ display:'flex',gap:4,borderBottom:'1px solid var(--border)' }}>
+          {ASSET_FILTERS.map(f => (
+            <button key={f.id} onClick={()=>{setAssetFilter(f.id); setSymbolFilter('');}} style={{
+              padding:'5px 12px',background:assetFilter===f.id?'var(--blue)':'transparent',
+              color:assetFilter===f.id?'#fff':'var(--muted)',border:'none',
+              borderBottom:assetFilter===f.id?'2px solid var(--blue)':'2px solid transparent',
+              cursor:'pointer',fontSize:12,fontWeight:assetFilter===f.id?600:400,borderRadius:'4px 4px 0 0'
+            }}>{f.label}</button>))}
+        </div>
+
+        {/* Symbol filter */}
+        {allSymbols.length > 1 && (
+          <select value={symbolFilter} onChange={e=>setSymbolFilter(e.target.value)} style={{
+            padding:'4px 8px',background:'var(--surface)',color:'var(--text)',border:'1px solid var(--border)',borderRadius:6,fontSize:12,minWidth:100
+          }}>
+            <option value="">All symbols</option>
+            {allSymbols.map(s => (
+              <option key={s} value={s}>{s}</option>))}
+          </select>
+        )}
+
+        {/* Reset */}
+        {(assetFilter!=='all'||symbolFilter) && (
+          <button onClick={()=>{setAssetFilter('all');setSymbolFilter('');}} style={{
+            padding:'4px 10px',background:'transparent',color:'var(--muted)',border:'1px solid var(--border)',
+            borderRadius:6,cursor:'pointer',fontSize:12
+          }}>Reset filters</button>
+        )}
+      </div>
+
+      {/* Loading */}
+      {loading && <div style={{ color:'var(--muted)' }}>Loading comprehensive report...</div>}
+      
+      {!loading && data && (
+        <>
+          {/* Stats row */}
+          <div style={{ display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:16 }}>
+            {renderPositions()}
+            <StatCard label="Total Realized P\u0026L" value={fmt$(totalRealizedPnl)} color={totalRealizedPnl>=0?'var(--green)':'var(--red)'}/>
+            <StatCard label="Total Trades (shown)" value={totalTrades}/>
+            <StatCard label="Buys / Sells" value={`${totalBuys} / ${totalSells}`}/>
+          </div>
+
+          {/* Detail tabs: Trades + Strategy History */}
+          {hasData && (
+            <>
+              <div style={{ display:'flex',gap:4,marginBottom:16,borderBottom:'1px solid var(--border)' }}>
+                <button onClick={()=>setDetailTab('trades')} style={{
+                  padding:'6px 14px',background:detailTab==='trades'?'var(--blue)':'transparent',
+                  color:detailTab==='trades'?'#fff':'var(--muted)',border:'none',
+                  borderBottom:detailTab==='trades'?'2px solid var(--blue)':'2px solid transparent',
+                  cursor:'pointer',fontSize:12,fontWeight:detailTab==='trades'?600:400,borderRadius:'4px 4px 0 0'
+                }}>Trade History ({data.trades.length})</button>
+                <button onClick={()=>setDetailTab('strategy')} style={{
+                  padding:'6px 14px',background:detailTab==='strategy'?'var(--blue)':'transparent',
+                  color:detailTab==='strategy'?'#fff':'var(--muted)',border:'none',
+                  borderBottom:detailTab==='strategy'?'2px solid var(--blue)':'2px solid transparent',
+                  cursor:'pointer',fontSize:12,fontWeight:detailTab==='strategy'?600:400,borderRadius:'4px 4px 0 0'
+                }}>Strategy History ({data.strategy_history?.length||0})</button>
+              </div>
+
+              {detailTab === 'trades' && renderTrades()}
+              {detailTab === 'strategy' && (noStratData ? <div style={{padding:16,textAlign:'center',color:'var(--muted)'}}>No strategy signal data for this filter</div> : renderStrategyHistory())}
+            </>
+          )}
+
+          {/* No data state */}
+          {!hasData && (
+            <div style={{ padding:32, textAlign:'center', color:'var(--muted)' }}>
+              No data for the selected filters. Try selecting a different asset class or symbol.
+            </div>
+          )}
+
+          {/* Active filters display */}
+          {(assetFilter!=='all'||symbolFilter) && (
+            <div style={{ marginTop:12, fontSize:11, color:'var(--muted)' }}>
+              Showing data for{' '}
+              {symbolFilter ? (
+                <>symbol <strong>{symbolFilter}</strong></>
+              ) : assetFilter === 'crypto' ? (
+                <strong>Crypto</strong>
+              ) : (
+                <strong>Stock/US Equity</strong>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </>
+  );
+}

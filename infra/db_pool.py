@@ -83,8 +83,8 @@ def get_db(name: str) -> DatabasePool:
                 db_path.mkdir(parents=True, exist_ok=True)
                 if name == "trades":
                     db_file = db_path / "trades.db"
-                elif name == "trading":
-                    db_file = db_path / "trading.db"
+                elif name == "bars":
+                    db_file = db_path / "bars.db"
                 else:
                     # Generic — use name as filename
                     db_file = db_path / f"{name}.db"
