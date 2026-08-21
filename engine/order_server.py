@@ -19,6 +19,7 @@ os.environ.setdefault("ALPACA_ENV", "paper")
 TRADE_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(TRADE_ROOT))
 
+from strategies.risk.manager import RiskManager, RiskCheckResult
 from infra.db_pool import get_db
 from infra.logger import get_logger, JSONFormatter
 
@@ -65,6 +66,7 @@ class SignalRouter:
         self.confidence_threshold = confidence_threshold or self.DEFAULT_CONFIDENCE_THRESHOLD
         self.signal_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
         self.active_signals: dict[str, list[dict]] = {}   # symbol → list of signal dicts
+        self._risk_mgr: RiskManager | None = None
 
     async def receive_signal(self, signal_dict: dict) -> None:
         """Queue a new signal for evaluation."""
@@ -78,6 +80,54 @@ class SignalRouter:
                    side=signal_dict.get("side"),
                    confidence=signal_dict.get("confidence", 0),
                    strategy=signal_dict.get("strategy", ""))
+
+    def _ensure_risk_mgr(self) -> RiskManager:
+        """Lazily initialize RiskManager with config from risk_limits.yaml."""
+        if self._risk_mgr is None:
+            import yaml
+            config_path = TRADE_ROOT / "config" / "risk_limits.yaml"
+            if config_path.exists():
+                with open(config_path) as f:
+                    risk_config = yaml.safe_load(f) or {}
+            else:
+                # Default risk limits if file is missing
+                risk_config = {
+                    "global": {
+                        "max_drawdown_dollar": -1000,
+                        "daily_loss_limit_dollar": -300,
+                        "min_cash_reserve_dollar": 5000,
+                        "max_total_exposure_dollar": 50000,
+                        "max_concurrent_positions": 10,
+                    }
+                }
+            self._risk_mgr = RiskManager(risk_config, {})
+        return self._risk_mgr
+
+    def _get_current_equity(self) -> float:
+        """Fetch current account equity via Alpaca REST. Default to $93000 if unavailable."""
+        try:
+            import http.client
+            import json as _json
+            env_file = TRADE_ROOT / "config" / ".env"
+            if not env_file.exists():
+                return 93000.0
+            with open(env_file) as f:
+                for line in f:
+                    if line.startswith("ALPACA_API_KEY="):
+                        api_key = line.strip().split("=", 1)[1].strip()
+                        break
+                else:
+                    return 93000.0
+            # Use Alpaca paper trading account endpoint
+            conn = http.client.HTTPSConnection("paper-api.alpaca.markets")
+            conn.request("GET", "/v2/account", headers={"Authorization": f"Bearer {api_key}", "Alpaca-API-Key": api_key})
+            resp = conn.getresponse()
+            data = resp.read()
+            conn.close()
+            account = _json.loads(data)
+            return float(account.get("equity", 93000.0))
+        except Exception:
+            return 93000.0
 
     async def evaluate_signals(self) -> list[dict]:
         """Drain the queue, evaluate, and write order directives to DB.
@@ -117,6 +167,51 @@ class SignalRouter:
             side = best.get("side", "buy")
             price = float(best.get("price", 0))
             source = best.get("strategy", "unknown")
+            qty = best.get("qty", 1)
+
+            # --- Risk check (if BUY) ---
+            if side.upper() == "BUY" and price > 0:
+                order_value = float(price * qty)
+                risk_dollar = order_value * confidence  # approximate risk
+                current_equity = self._get_current_equity()
+                risk_mgr = self._ensure_risk_mgr()
+                check = risk_mgr.pre_trade_check(
+                    symbol=sym.upper(),
+                    order_value_dollar=order_value,
+                    risk_dollar=risk_dollar,
+                    current_equity=current_equity,
+                )
+                if not check.approved:
+                    _safe_info(_log, "signal_risk_rejected",
+                               symbol=sym.upper(),
+                               reason=check.reason,
+                               order_value=order_value,
+                               equity=current_equity)
+                    # Write rejected signal to engine_signals for audit trail
+                    try:
+                        conn = self.db.connect()
+                        try:
+                            conn.execute(
+                                """INSERT INTO engine_signals 
+                                   (timestamp, symbol, side, strategy, confidence, status, reason, engine)
+                                   VALUES (?, ?, ?, ?, ?, 'rejected', ?, 'order-server-risk")
+                           """,
+                                (
+                                    datetime.now(ZoneInfo("America/New_York")).isoformat(),
+                                    sym.upper(),
+                                    side,
+                                    source,
+                                    best.get("confidence", 0),
+                                    check.reason,
+                                ),
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    except Exception as e:
+                        _safe_error(_log, "rejected_signal_write_error",
+                                    symbol=sym.upper(), error=str(e))
+                    continue  # skip writing to orders
 
             try:
                 conn = self.db.connect()

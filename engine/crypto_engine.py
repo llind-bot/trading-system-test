@@ -34,6 +34,41 @@ class CryptoEngine:
         self.signals_db = get_db("trades")
         self.watchlist: dict[str, dict] = {}
         self.signal_queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self._risk_config_cache: dict[str, float] = {}  # symbol -> max_position_dollar
+
+    def _get_risk_config(self) -> dict[str, float]:
+        """Load risk limits from watchlist.yaml on first call, then cache."""
+        if not self._risk_config_cache:
+            import yaml
+            wl_path = TRADE_ROOT / "config" / "watchlist.yaml"
+            if wl_path.exists():
+                with open(wl_path) as f:
+                    data = yaml.safe_load(f) or {}
+                for asset in data.get("assets", []):
+                    sym = str(asset.get("symbol", "")).upper()
+                    if sym:
+                        self._risk_config_cache[sym] = float(
+                            asset.get("max_position_dollar", 1000)
+                        )
+            else:
+                # Default cap if watchlist missing
+                pass
+        return self._risk_config_cache
+
+    def _get_existing_position_value(self, symbol: str) -> float:
+        """Get current position value for a symbol from the positions table."""
+        try:
+            conn = self.signals_db.connect()
+            row = conn.execute(
+                "SELECT qty * current_price FROM positions WHERE symbol=? AND qty > 1e-10",
+                (symbol.upper(),),
+            ).fetchone()
+            conn.close()
+            if row and row[0]:
+                return max(float(row[0]), 0)
+        except Exception:
+            pass
+        return 0.0
 
     async def _load_config(self):
         """Load watchlist from config."""
@@ -91,6 +126,43 @@ class CryptoEngine:
                     if side and side not in ("HOLD", None):
                         # Include the last bar's close as the signal price (fallback market price)
                         signal_price = bars[-1]["open"] if bars else 0.0
+                        
+                        # --- Risk check before writing to DB ---
+                        if side.upper() == "BUY" and signal_price > 0:
+                            risk_cfg = self._get_risk_config()
+                            max_pos_dollar = float(
+                                asset_cfg.get("max_position_dollar", risk_cfg.get(symbol.upper(), 1000))
+                            )
+                            existing_value = self._get_existing_position_value(symbol)
+                            total_after = existing_value + signal_price * 1.0  # qty=1 default
+                            if total_after > max_pos_dollar:
+                                _log.warning("position_limit_exceeded", symbol=symbol,
+                                    side=side, price=signal_price,
+                                    total_after=f"${total_after:,.0f}", limit=max_pos_dollar)
+                                # Write rejected signal for audit trail
+                                try:
+                                    rconn = self.signals_db.connect()
+                                    try:
+                                        rconn.execute(
+                                            "INSERT INTO engine_signals "
+                                            "(timestamp, symbol, side, strategy, confidence, status, reason, engine)"
+                                            " VALUES (?, ?, ?, ?, ?, 'rejected', ?, ?)",
+                                            (
+                                                datetime.now(timezone.utc).isoformat(),
+                                                symbol.upper(),
+                                                side,
+                                                strat_name,
+                                                confidence,
+                                                f"Position cap exceeded: ${total_after:,.0f} > ${max_pos_dollar:,.0f}",
+                                                "crypto-engine",
+                                            ),
+                                        )
+                                        rconn.commit()
+                                    finally:
+                                        rconn.close()
+                                except Exception as e:
+                                    _log.error("rejected_signal_write_error", symbol=symbol, error=str(e))
+                                continue
                         
                         self._write_signal_to_db(symbol, {
                             "side": side,

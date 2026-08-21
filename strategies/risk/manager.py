@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from src.data.symbol_utils import to_alpaca
+
 
 # ── Config path shared with the rest of the trading system ──
 _CONFIG_DIR = Path(__file__).parent.parent.parent / "config"
