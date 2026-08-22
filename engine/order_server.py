@@ -10,7 +10,7 @@ import logging
 import os
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -305,14 +305,18 @@ class OrderServer:
                     "reason": row[5] if len(row) > 5 else "",
                 })
 
-            # Mark as processed in DB
+            # Mark as processed in DB (batch to avoid SQLite 999-param limit)
             ids = [r[0] for r in rows]
             if ids:
-                placeholders = ",".join("?" for _ in ids)
-                conn.execute(
-                    f"UPDATE engine_signals SET status = 'processed', processed_at = ? WHERE id IN ({placeholders})",
-                    [datetime.now(timezone.utc).isoformat()] + ids,
-                )
+                batch_size = 500
+                ts = datetime.now(timezone.utc).isoformat()
+                for start in range(0, len(ids), batch_size):
+                    batch_ids = ids[start:start + batch_size]
+                    placeholders = ",".join("?" for _ in batch_ids)
+                    conn.execute(
+                        f"UPDATE engine_signals SET status = 'processed', processed_at = ? WHERE id IN ({placeholders})",
+                        [ts] + batch_ids,
+                    )
                 conn.commit()
         finally:
             conn.close()

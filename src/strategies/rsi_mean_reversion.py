@@ -78,4 +78,6 @@ class RSI_MeanReversion(BaseStrategy):
                 stop_loss_price=current_price * 0.98,
             )
 
-        return StrategyResult(Signal.HOLD, 0.0, f"{rsi_label}={rsi_val:.1f} in range")
+        # ── No signal — score proximity to trigger zones ─────────────────
+        conf = 0.0
+        reason_parts = [f"{rsi_label}={rsi_val:.1f}\n\n        if rsi_val \u003c p[\"oversold_threshold\"]:\n            near_rsi = (p[\"oversold_threshold\"] - rsi_val) / p[\"oversold_threshold\"] * 100\n            conf = min(conf, 0.4 + (near_rsi / 100) * 0.3)\n            reason_parts.append(f\"Near oversold: depth {near_rsi:.1f}%\")\n        elif rsi_val \u003e overbought:\n            near_rsi = (rsi_val - overbought) / (100 - overbought) * 100\n            conf = min(conf, 0.4 + (near_rsi / 100) * 0.3)\n            reason_parts.append(f\"Near overbought: depth {near_rsi:.1f}%\")\n        else:\n            rsi_centerness = abs(rsi_val - 50) / 50\n            conf = min(0.2, rsi_centerness * 0.2)\n            reason_parts.append(\"Normal range\")\n\n        return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), \" | \".join(reason_parts))"}

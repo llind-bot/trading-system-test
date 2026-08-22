@@ -234,12 +234,37 @@ class CryptoSwingDaily(BaseStrategy):
                 stop_loss_price=sl_price,
             )
 
-        # ── No signal -- price inside bands ───────────────────────────────
+        # ── No signal -- price inside bands (score proximity to trigger zones) ───────────────────────────────
         pct_of_bb = ((current_close - bb["lower"]) / (bb["upper"] - bb["lower"])) * 100 \
             if (bb["upper"] - bb["lower"]) != 0 else 50
 
+        # Partial confidence: how close are we to a BUY/SELL trigger?
+        conf = 0.0
+        reason_parts = [f"In range: RSI={rsi_val:.1f}"]
+
+        # Near lower BB + RSI approaching oversold → buy proximity
+        if current_close < bb["middle"]:
+            near_bb_pct = max(0, (bb["lower"] - current_close) / bb["lower"] * 100) if bb["lower"] > 0 else 999
+            # Use 100 - pct_of_bb for proximity to lower band
+            proximity_to_lower = min(100, max(0, (bb["lower"] * (1 + 0.05) - current_close) / (bb["upper"] - bb["lower"]) * 100)) if (bb["upper"] - bb["lower"]) > 0 else 0
+            near_rsi = max(0, (p["oversold_threshold"] - rsi_val) / p["oversold_threshold"] * 100)
+            conf = min(conf, 0.4 + (min(proximity_to_lower, 50) / 50) * 0.3 + (near_rsi / 100) * 0.2)
+            reason_parts.append(f"Near lower BB: {proximity_to_lower:.1f}%")
+
+        # Near upper BB + RSI approaching overbought → sell proximity
+        elif current_close >= bb["middle"]:
+            proximity_to_upper = min(100, max(0, (current_close - bb["upper"] * 0.95) / (bb["upper"] - bb["lower"]) * 100)) if (bb["upper"] - bb["lower"]) > 0 else 0
+            near_rsi = max(0, (rsi_val - p["overbought_threshold"]) / (100 - p["overbought_threshold"]) * 100)
+            conf = min(conf, 0.4 + (min(proximity_to_upper, 50) / 50) * 0.3 + (near_rsi / 100) * 0.2)
+            reason_parts.append(f"Near upper BB: {proximity_to_upper:.1f}%")
+
+        if conf == 0.0:
+            # Neutral position — score based on RSI distance from center
+            rsi_centerness = abs(rsi_val - 50) / 50
+            conf = min(0.25, rsi_centerness * 0.25)
+            reason_parts.append(f"Neutral: {pct_of_bb:.0f}% of BB width")
+
         return StrategyResult(
-            Signal.HOLD, 0.0,
-            f"In range: RSI={rsi_val:.1f} | Price at {pct_of_bb:.0f}% of BB width "
-            f"(close={current_close:.2f}, lower={bb['lower']:.2f}, upper={bb['upper']:.2f})"
+            Signal.HOLD, round(max(0.01, conf), 2),
+            " | ".join(reason_parts)
         )

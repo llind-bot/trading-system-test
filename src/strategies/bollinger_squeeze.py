@@ -80,7 +80,17 @@ class Bollinger_Squeeze(BaseStrategy):
         elif current_price <= bb["lower"] * 1.005:
             return StrategyResult(Signal.HOLD, 0.4, f"Near lower band (${bb['lower']:.2f})")
 
-        return StrategyResult(Signal.HOLD, 0.0, f"BB normal — BW={bb['bandwidth']:.4f}")
+        if conf == 0.0:
+            # Neutral scoring: distance from center of BB
+            bb_width = bb["upper"] - bb["lower"]
+            if bb_width > 0:
+                pct_in_bb = (current_price - bb["lower"]) / bb_width * 100
+            else:
+                pct_in_bb = 50
+            rsi_centerness = abs(pct_in_bb - 50) / 50
+            conf = min(0.2, rsi_centerness * 0.2)
+        
+        return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), f"BB normal — BW={bb['bandwidth']:.4f}")
 
     def warm_up_bars_needed(self):
         return 30

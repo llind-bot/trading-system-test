@@ -159,4 +159,22 @@ class CryptoSwingReversion(BaseStrategy):
                 entry_price=current_price,
             )
         
-        return StrategyResult(Signal.HOLD, 0.0, f"RSI={rsi_val:.1f} normal range")
+        # ── No signal — score proximity to trigger zones ─────────────────
+        conf = 0.0
+        reason_parts = [f"RSI={rsi_val:.1f}"]
+
+        if price_below_lower and rsi_val < p["oversold_threshold"]:
+            near_rsi = (p["oversold_threshold"] - rsi_val) / p["oversold_threshold"] * 100
+            conf = min(conf, 0.4 + (near_rsi / 100) * 0.3)
+            reason_parts.append(f"Near oversold: RSI depth {near_rsi:.1f}%")
+        elif price_above_upper and rsi_val > p["overbought_threshold"]:
+            near_rsi = (rsi_val - p["overbought_threshold"]) / (100 - p["overbought_threshold"]) * 100
+            conf = min(conf, 0.4 + (near_rsi / 100) * 0.3)
+            reason_parts.append(f"Near overbought: RSI depth {near_rsi:.1f}%")
+        else:
+            # Neutral scoring based on distance from mean-reversion zones
+            rsi_centerness = abs(rsi_val - 50) / 50
+            conf = min(0.2, rsi_centerness * 0.2)
+            reason_parts.append(f"Normal range")
+
+        return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), " | ".join(reason_parts))

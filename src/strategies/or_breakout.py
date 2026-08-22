@@ -52,7 +52,22 @@ class OR_Breakout(BaseStrategy):
                 stop_loss_price=current_price * 1.02,
             )
 
-        return StrategyResult(Signal.HOLD, 0.0, f"In range (${low_range:.2f} - ${high_range:.2f})")
+        # In range — score proximity to breakout edges
+        proximity_upper = (current_price - low_range) / (high_range - low_range) * 100 if high_range > low_range else 50
+        
+        if current_price >= high_range * 0.98:
+            conf = 0.4
+            reason = f"Near breakout upper: {proximity_upper:.0f}% of range"
+        elif current_price <= low_range * 1.02:
+            conf = 0.4
+            reason = f"Near breakdown lower: {proximity_upper:.0f}% of range"
+        else:
+            # Middle of range — neutral score
+            dist_from_center = abs(proximity_upper - 50) / 50
+            conf = min(0.2, dist_from_center * 0.15)
+            reason = f"In range ({low_range:.2f} - {high_range:.2f}), center={proximity_upper:.0f}%"
+        
+        return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), reason)
 
     def warm_up_bars_needed(self):
         return 5

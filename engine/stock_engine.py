@@ -267,7 +267,7 @@ class StockEngine:
             for symbol in self.watchlist.keys():
                 rows = conn.execute(
                     "SELECT timestamp, open, high, low, close, volume FROM bars_stock "
-                    "WHERE symbol = ? AND timeframe='1m' ORDER BY timestamp ASC",
+                    "WHERE symbol = ? AND bar_type='240t' ORDER BY timestamp ASC",
                     (symbol,),
                 ).fetchall()
                 
@@ -288,14 +288,17 @@ class StockEngine:
         conn = self.signals_db.connect()
         try:
             conn.execute("""
-                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, timestamp)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO engine_signals (symbol, side, strategy, confidence, status, reason, price, engine, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 symbol.upper(),
                 signal_result["side"],
                 signal_result.get("strategy", "crypto_swing_daily"),
                 signal_result.get("confidence", 0.0),
                 'pending',
+                signal_result.get("reason", ''),
+                signal_result.get("price", 0.0),
+                'stock-engine',
                 datetime.now(timezone.utc).isoformat(),
             ))
             conn.commit()

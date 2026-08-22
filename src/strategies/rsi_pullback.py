@@ -78,12 +78,22 @@ class RSI_Pullback:
         # Condition 1: RSI(14) < threshold (oversold zone)
         rsi_val = self._rsi(closes, period)
         if rsi_val is None or rsi_val >= rsi_threshold:
-            return StrategyResult(Signal.HOLD, 0.0, f"RSI({period})={rsi_val:.1f} (threshold {rsi_threshold})")
+            # Score proximity to oversold threshold
+            if rsi_val is not None and rsi_val > 0:
+                proximity = (rsi_threshold - rsi_val) / rsi_threshold * 100
+                conf = min(0.4, proximity * 0.3) if rsi_val \u003e= rsi_threshold * 0.85 else 0.0
+            else:
+                conf = 0.0
+            reason_parts = [f"RSI({period})={rsi_val:.1f if rsi_val is not None else 'N/A'}"]
+            return StrategyResult(Signal.HOLD, round(max(0.01, conf) if conf > 0 else 0.01, 2), f'{" | ".join(reason_parts)} | Near oversold: {proximity:.0f}%' if conf > 0 else 'RSI not yet oversold')
         
         # Condition 2: Price above SMA(20) — broader uptrend intact
         sma_val = self._sma(closes, sma_period)
         if sma_val is not None and closes[-1] <= sma_val:
-            return StrategyResult(Signal.HOLD, 0.3, f"Price ${closes[-1]:.4f} below SMA${sma_val:.4f}")
+            # Score how close price is to SMA (near-support in downtrend still interesting)
+            dist_pct = ((sma_val - closes[-1]) / sma_val * 100) if sma_val > 0 else 999
+            conf = max(0.05, min(0.3, 0.3 * (1 - dist_pct / 5)))
+            return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), f'Price ${closes[-1]:.4f} near SMA${sma_val:.4f} ({dist_pct:.2f}% below)')
         
         # Condition 2b: If no SMA data yet (less than 20 bars), use trend filter:
         # Last 5 bars avg close > first 5 bars avg close = uptrend

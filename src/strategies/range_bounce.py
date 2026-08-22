@@ -211,7 +211,25 @@ class Range_Bounce(BaseStrategy):
                             entry_price=current_close,
                         )
 
-        # No signal — price not at any support/resistance level or wrong direction
+        # No signal — score proximity to nearest support/resistance or range edges
         pct_in_range = (current_close - current_low) / (current_high - current_low) * 100 if current_high > current_low else 50
-        return StrategyResult(Signal.HOLD, 0.0, f"In-range: RSI={rsi_val:.1f} | {pct_in_range:.0f}% of range")
+        
+        conf = 0.0
+        reason_parts = [f"RSI={rsi_val:.1f}", f"{pct_in_range:.0f}% of range"]
+        
+        # Near support edge (bottom of range) or near resistance edge (top)
+        if pct_in_range \u003c 15:
+            proximity = (15 - pct_in_range) / 15
+            conf = min(conf, 0.4 + proximity * 0.2)
+            reason_parts.append("Near support")
+        elif pct_in_range \u003e 85:
+            proximity = (pct_in_range - 85) / 15
+            conf = min(conf, 0.4 + proximity * 0.2)
+            reason_parts.append("Near resistance")
+        
+        if conf == 0.0 and len(ranges) == 0:
+            # No ranges detected at all — price is trending, score low
+            conf = 0.1
+        
+        return StrategyResult(Signal.HOLD, round(max(0.01, conf), 2), " | ".join(reason_parts))
 
